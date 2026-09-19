@@ -1,6 +1,8 @@
 package com.imi.smartedge.sidebar.panel
 
 import android.app.Application
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.graphics.drawable.Drawable
 import android.util.Log
 import com.bumptech.glide.Glide
@@ -70,5 +72,33 @@ class SidePanelApp : Application() {
             Drawable::class.java,
             AppIconModelLoader.Factory(this)
         )
+
+        // Create notification channels early so they exist before any
+        // notification is posted (including the dock-test notification).
+        createNotificationChannels()
+    }
+
+    private fun createNotificationChannels() {
+        val manager = getSystemService(NotificationManager::class.java)
+
+        val panelChannel = NotificationChannel(
+            FloatingPanelService.CHANNEL_ID,
+            getString(R.string.panel_notification_channel),
+            NotificationManager.IMPORTANCE_MIN
+        ).apply {
+            description = getString(R.string.panel_notification_desc)
+            setShowBadge(false)
+        }
+        manager.createNotificationChannel(panelChannel)
+
+        val dockChannel = NotificationChannel(
+            FloatingPanelService.DOCK_TEST_CHANNEL_ID,
+            "Dock Test",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Debug actions to test dock-to-bubble resizing"
+            setShowBadge(false)
+        }
+        manager.createNotificationChannel(dockChannel)
     }
 }

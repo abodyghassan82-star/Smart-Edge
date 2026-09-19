@@ -21,9 +21,17 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
 
     private lateinit var binding: ActivityMainM3Binding
     private lateinit var panelPrefs: PanelPreferences
+    private val dockTestHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var dockTestCountdown: Runnable? = null
 
     override fun attachBaseContext(newBase: android.content.Context) {
         super.attachBaseContext(LocaleHelper.onAttach(newBase))
+    }
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        // Channels are already created in SidePanelApp; no further action needed.
     }
 
     private val overlayPermissionLauncher = registerForActivityResult(
@@ -55,6 +63,15 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
 
         setupListeners()
         registerPinnedShortcut()
+        setupDockTest()
+
+        // Request POST_NOTIFICATIONS on Android 13+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val perm = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+            if (perm != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
     }
 
     private fun registerPinnedShortcut() {
@@ -384,5 +401,78 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
         } else {
             startService(intent)
         }
+    }
+
+    // ── Dock Test Card ─────────────────────────────────────────────────────
+
+    private fun setupDockTest() {
+        binding.btnDockCheckShizuku.setOnClickListener {
+            val log = StringBuilder()
+            DockTestHelper.checkShizuku(log)
+            appendDockLog(log.toString())
+        }
+
+        binding.btnDockShrink.setOnClickListener {
+            // Cancel any previous countdown
+            dockTestCountdown?.let { dockTestHandler.removeCallbacks(it) }
+
+            appendDockLog("\n⏳ Shrink starting in 3 seconds — switch to your freeform window now…\n")
+            binding.btnDockShrink.isEnabled = false
+            binding.btnDockShrink.text = "3s…"
+
+            var remaining = 3
+            val tick = object : Runnable {
+                override fun run() {
+                    remaining--
+                    if (remaining > 0) {
+                        binding.btnDockShrink.text = "${remaining}s…"
+                        dockTestHandler.postDelayed(this, 1000)
+                    } else {
+                        binding.btnDockShrink.isEnabled = true
+                        binding.btnDockShrink.text = "Shrink (3s)"
+                        val log = StringBuilder()
+                        val summary = DockTestHelper.shrink(this@MainActivity, log)
+                        appendDockLog(log.toString())
+                        binding.root.showModernToast(summary)
+                    }
+                }
+            }
+            dockTestCountdown = tick
+            dockTestHandler.postDelayed(tick, 1000)
+        }
+
+        binding.btnDockRestore.setOnClickListener {
+            val log = StringBuilder()
+            val summary = DockTestHelper.restore(this, log)
+            appendDockLog(log.toString())
+            binding.root.showModernToast(summary)
+        }
+
+        binding.btnDockCopyLog.setOnClickListener {
+            val text = binding.tvDockTestLog.text?.toString() ?: ""
+            val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val clip = android.content.ClipData.newPlainText("Dock Test Log", text)
+            clipboard.setPrimaryClip(clip)
+            binding.root.showModernToast("Log copied to clipboard")
+        }
+
+        binding.btnDockClearLog.setOnClickListener {
+            binding.tvDockTestLog.text = "Tap 'Check Shizuku' to start."
+        }
+    }
+
+    private fun appendDockLog(text: String) {
+        val tv = binding.tvDockTestLog
+        val current = tv.text?.toString() ?: ""
+        val new = if (current == "Tap 'Check Shizuku' to start.") text else "$current\n$text"
+        tv.text = new
+        binding.dockTestLogScroll.post {
+            binding.dockTestLogScroll.fullScroll(View.FOCUS_DOWN)
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        dockTestCountdown?.let { dockTestHandler.removeCallbacks(it) }
     }
 }
