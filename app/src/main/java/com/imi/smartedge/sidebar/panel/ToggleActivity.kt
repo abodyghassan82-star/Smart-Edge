@@ -16,7 +16,7 @@ import androidx.appcompat.app.AppCompatActivity
 class ToggleActivity : AppCompatActivity() {
 
     companion object {
-        const val ACTION_TOGGLE = "com.imi.smartedge.sidebar.panel.TOGGLE"
+        const val ACTION_TOGGLE = "com.abody.smartedgedock.TOGGLE"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

@@ -111,20 +111,22 @@ class FloatingPanelService : Service() {
             private set
             
         const val CHANNEL_ID = "side_panel_channel"
+        const val DOCK_TEST_CHANNEL_ID = "dock_test_channel"
         const val NOTIFICATION_ID = 1001
-        const val ACTION_STOP = "com.imi.smartedge.sidebar.panel.STOP"
-        const val ACTION_OPEN = "com.imi.smartedge.sidebar.panel.OPEN"
-        const val ACTION_OPEN_HUB = "com.imi.smartedge.sidebar.panel.OPEN_HUB"
-        const val ACTION_REFRESH = "com.imi.smartedge.sidebar.panel.REFRESH"
-        const val ACTION_CLOSE_PANEL = "com.imi.smartedge.sidebar.panel.CLOSE_PANEL"
-        const val ACTION_SHOW_TEMP = "com.imi.smartedge.sidebar.panel.SHOW_TEMP"
-        const val ACTION_TOGGLE = "com.imi.smartedge.sidebar.panel.TOGGLE"
-        const val ACTION_SCREENSHOT = "com.imi.smartedge.sidebar.panel.SCREENSHOT"
-        const val ACTION_UPDATE_IMMERSIVE = "com.imi.smartedge.sidebar.panel.UPDATE_IMMERSIVE"
-        const val ACTION_TOGGLE_FLASHLIGHT = "com.imi.smartedge.sidebar.panel.TOGGLE_FLASHLIGHT"
-        const val ACTION_LAUNCH_CAMERA = "com.imi.smartedge.sidebar.panel.LAUNCH_CAMERA"
-        const val ACTION_TOGGLE_ROTATION = "com.imi.smartedge.sidebar.panel.TOGGLE_ROTATION"
-        const val ACTION_OPEN_FAV_APP = "com.imi.smartedge.sidebar.panel.OPEN_FAV_APP"
+        const val DOCK_TEST_NOTIFICATION_ID = 1002
+        const val ACTION_STOP = "com.abody.smartedgedock.STOP"
+        const val ACTION_OPEN = "com.abody.smartedgedock.OPEN"
+        const val ACTION_OPEN_HUB = "com.abody.smartedgedock.OPEN_HUB"
+        const val ACTION_REFRESH = "com.abody.smartedgedock.REFRESH"
+        const val ACTION_CLOSE_PANEL = "com.abody.smartedgedock.CLOSE_PANEL"
+        const val ACTION_SHOW_TEMP = "com.abody.smartedgedock.SHOW_TEMP"
+        const val ACTION_TOGGLE = "com.abody.smartedgedock.TOGGLE"
+        const val ACTION_SCREENSHOT = "com.abody.smartedgedock.SCREENSHOT"
+        const val ACTION_UPDATE_IMMERSIVE = "com.abody.smartedgedock.UPDATE_IMMERSIVE"
+        const val ACTION_TOGGLE_FLASHLIGHT = "com.abody.smartedgedock.TOGGLE_FLASHLIGHT"
+        const val ACTION_LAUNCH_CAMERA = "com.abody.smartedgedock.LAUNCH_CAMERA"
+        const val ACTION_TOGGLE_ROTATION = "com.abody.smartedgedock.TOGGLE_ROTATION"
+        const val ACTION_OPEN_FAV_APP = "com.abody.smartedgedock.OPEN_FAV_APP"
     }
 
     override fun onCreate() {
@@ -156,6 +158,9 @@ class FloatingPanelService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, buildNotification())
         }
+
+        val dockNm = getSystemService(NotificationManager::class.java)
+        dockNm.notify(DOCK_TEST_NOTIFICATION_ID, buildDockTestNotification())
 
         initSidePanel()
         initPickerPanel()
@@ -433,6 +438,10 @@ class FloatingPanelService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
+        try {
+            val dockNm = getSystemService(NotificationManager::class.java)
+            dockNm.cancel(DOCK_TEST_NOTIFICATION_ID)
+        } catch (e: Exception) {}
         try {
             cameraManager?.unregisterTorchCallback(torchCallback)
         } catch (e: Exception) {}
@@ -1111,6 +1120,16 @@ class FloatingPanelService : Service() {
         }
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
+
+        val dockChannel = NotificationChannel(
+            DOCK_TEST_CHANNEL_ID,
+            "Dock Test",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Debug actions to test dock-to-bubble resizing"
+            setShowBadge(false)
+        }
+        manager.createNotificationChannel(dockChannel)
     }
 
     private fun buildNotification(): android.app.Notification {
@@ -1136,6 +1155,7 @@ class FloatingPanelService : Service() {
             this, 0, openMainIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(getString(R.string.panel_running))
@@ -1146,6 +1166,36 @@ class FloatingPanelService : Service() {
             .addAction(android.R.drawable.ic_menu_close_clear_cancel,
                 getString(R.string.stop_panel), stopPending)
             .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setOngoing(true)
+            .build()
+    }
+
+    private fun buildDockTestNotification(): android.app.Notification {
+        val shrinkIntent = Intent(this, DockTestReceiver::class.java).apply {
+            action = DockTestReceiver.ACTION_SHRINK
+        }
+        val shrinkPending = PendingIntent.getBroadcast(
+            this, 10, shrinkIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val restoreIntent = Intent(this, DockTestReceiver::class.java).apply {
+            action = DockTestReceiver.ACTION_RESTORE
+        }
+        val restorePending = PendingIntent.getBroadcast(
+            this, 11, restoreIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        return NotificationCompat.Builder(this, DOCK_TEST_CHANNEL_ID)
+            .setContentTitle("Dock Test")
+            .setContentText("Shrink / restore freeform window via Shizuku")
+            .setSmallIcon(android.R.drawable.ic_menu_search)
+            .addAction(android.R.drawable.ic_menu_search,
+                getString(R.string.dock_test_shrink), shrinkPending)
+            .addAction(android.R.drawable.ic_menu_revert,
+                getString(R.string.dock_test_restore), restorePending)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .build()
     }

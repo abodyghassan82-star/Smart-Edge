@@ -133,3 +133,46 @@ Step 3: implement it. Don't break existing features. Add the settings from 4.5. 
 
 After each step, tell me exactly what to test on my Nubia Neo 3 GT (Android 15) and what logs to send back if it fails.
 ```
+
+---
+
+## 11. Design Requirements (visual and interaction)
+
+The following are non-functional design requirements for the header bar, dock animation, bubble, and related micro-interactions. They apply to the overlay windows drawn by the feature, not to the existing side panel.
+
+### 11.1 Header Bar
+
+- **Shape:** Rounded rectangle (20 dp corners), semi-transparent background.
+- **Transparency:** Try `FLAG_BLUR_BEHIND` on Android 12+ with a solid fallback (`#CC1F1F1F`) on older versions or when the device doesn't support blur.
+- **Theme:** Follow system light/dark. Use `colorSurfaceContainerHighest` for the background and `colorOnSurface` for text/icons from Material 3 dynamic color.
+- **Content:** App icon (loaded via Glide at 24×24 dp), app label (truncated with ellipsis after 12 characters), and three touch targets: expand (top-left), drag handle pill (top-centre, 32×4 dp rounded bar), close (top-right, 24×24 dp). A fourth button, **minimize/dock**, sits below the close button.
+- **Buttons:** Ripple drawable on each touch target. No text labels – icons only.
+- **Attachment:** The header follows the freeform window as it is moved or resized. It is drawn as a separate `TYPE_APPLICATION_OVERLAY` positioned relative to the window's reported bounds; on each `TYPE_WINDOW_CONTENT_CHANGED` event the bounds are re-read and the header repositioned.
+- **Scope:** Header appears only for windows launched from the Smart Edge Dock panel, not for all freeform windows.
+
+### 11.2 Dock Animation
+
+- **Trigger:** Tapping the dock button, or dragging the freeform window so it overlaps the left or right screen edge zone.
+- **Shrink animation:** The window scales down toward the bubble position over 250 ms using `DecelerateInterpolator`. Simultaneously the window fades to 0. The header overlay fades out on the same timeline.
+- **Bubble pop-in:** After the window shrink completes, the bubble view animates in with `SpringAnimation` (stiffness = 800, damping ratio = 0.6) giving a slight spring overshoot.
+- **Respect "Remove animations":** Check `Settings.Global.ANIMATOR_DURATION_SCALE`. If it is 0, skip all animation steps and apply the final state instantly.
+- **Target framerate:** Animations must stay smooth at 60 fps. Avoid allocations in animation callbacks. Do not pull in heavy third-party animation libraries; use `androidx.dynamicanimation` (already a dependency) and the built-in `ValueAnimator` / `AnimatorSet`.
+
+### 11.3 Bubble
+
+- **Shape:** Rounded white tab (16 dp corners) docked flush against the screen edge, containing the app icon at 28×28 dp.
+- **Dragging:** On drag start, scale the bubble up to 1.15× with `OvershootInterpolator(1.5f)` over 150 ms, and add an `Elevation` of 8 dp for a soft shadow.
+- **Snap:** On drag release, the bubble snaps to the nearest edge (left or right) using `SpringAnimation` (stiffness = 600, damping ratio = 0.7). If it was already on that edge, snap to the nearest valid Y position (accounting for status bar and nav bar insets).
+- **Idle state:** After 3 seconds of no interaction, the bubble half-hides: its translationX animates so that only 40% of its width protrudes from the edge, and its alpha drops to 0.5. Any touch or drag restores full visibility instantly.
+- **Close target while dragging:** While a bubble is being dragged, a circular close target (red tint, "×" icon, 48×48 dp) appears at the bottom centre of the screen. If the bubble is dropped onto this target the task is closed. This mirrors the chat-head pattern.
+- **Haptic feedback:** A short haptic pulse (`HapticFeedbackConstants.CONTEXT_CLICK`) on dock and on snap-to-edge. Use `Vibrator.createOneShot(20ms, DEFAULT_AMPLITUDE)` when the system haptic is unavailable.
+- **Media indicator:** If the docked app currently has an active `MediaSession` with `playbackState == STATE_PLAYING`, show a small animated equaliser icon (3 bars, `ValueAnimator` cycling bar heights) at the bottom-right of the bubble. This is purely cosmetic and does not control playback.
+
+### 11.4 Constraints and Compatibility
+
+- **Do NOT redesign the existing side panel.** The panel, picker, and handle remain exactly as they are.
+- **System animation setting:** `Settings.Global.ANIMATOR_DURATION_SCALE == 0` → no animations, instant state changes.
+- **Orientation:** Bubbles must survive rotation. On configuration change, re-read screen dimensions and reposition all bubbles. The bubble's `WindowManager.LayoutParams.gravity` and Y offset are recalculated.
+- **Multiple bubbles:** Stack vertically with 8 dp spacing. If there is not enough vertical space, reduce spacing down to a minimum of 2 dp before clipping.
+- **Performance:** All overlay views are lightweight single-`View` custom draws (not `RecyclerView` or `Compose`). No network calls on the main thread. Icon loading via Glide with `override(28, 28)`.
+- **Battery:** The foreground service notification must stay visible whenever any bubble exists. When all bubbles are removed, the service may optionally stop itself (controlled by a user preference).

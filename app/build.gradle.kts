@@ -11,7 +11,7 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.imi.smartedge.sidebar.panel"
+        applicationId = "com.abody.smartedgedock"
         minSdk = 26
         targetSdk = 34
         versionCode = 14

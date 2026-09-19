@@ -1,13 +1,13 @@
 <resources>
-    <string name="app_name">Smart Edge</string>
+    <string name="app_name">Smart Edge Dock</string>
     <string name="app_picker_title">Choose Apps</string>
     <string name="settings_title">SidePanel Settings</string>
     <string name="shortcut_toggle_short">Sidebar</string>
     <string name="shortcut_toggle_long">Toggle Sidebar</string>
     <string name="shortcut_screenshot">Take Screenshot</string>
     <string name="shortcut_hub">Open Productivity Hub</string>
-    <string name="panel_running">Smart Edge is active</string>
-    <string name="panel_notification_channel">Smart Edge Service</string>
+    <string name="panel_running">Smart Edge Dock is active</string>
+    <string name="panel_notification_channel">Smart Edge Dock Service</string>
     <string name="panel_notification_desc">Keeps the side panel available over all apps</string>
     <string name="start_panel">Start Panel</string>
     <string name="stop_panel">Stop Panel</string>
@@ -252,4 +252,8 @@
     <string name="section_desktop_shortcuts">Desktop Shortcuts</string>
     <string name="feature_add_shortcut_label">Add Toggle Shortcut</string>
     <string name="feature_add_shortcut_desc">Pin a shortcut to your home screen to quickly toggle the sidebar</string>
+
+    <!-- Dock Test (Debug) -->
+    <string name="dock_test_shrink">Dock: Shrink</string>
+    <string name="dock_test_restore">Dock: Restore</string>
 </resources>

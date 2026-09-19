@@ -187,7 +187,7 @@ class PanelAccessibilityService : AccessibilityService() {
             
             val isSystemPkg = packageName == "android" || packageName == "com.android.systemui"
             
-            if (packageName != "com.imi.smartedge.sidebar.panel" && packageName != imePackage && !isSystemPkg) {
+            if (packageName != "com.abody.smartedgedock" && packageName != imePackage && !isSystemPkg) {
                 if (panelPrefs.serviceEnabled) {
                     val closeIntent = Intent(this, FloatingPanelService::class.java).apply {
                         action = FloatingPanelService.ACTION_CLOSE_PANEL
