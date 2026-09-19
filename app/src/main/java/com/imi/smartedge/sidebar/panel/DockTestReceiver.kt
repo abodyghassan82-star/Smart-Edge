@@ -262,7 +262,7 @@ class DockTestReceiver : BroadcastReceiver() {
             .invoke(null, serviceName) as android.os.IBinder
 
         // Wrap it so transact calls go through Shizuku (bypassing permission checks)
-        val wrapper = ShizukuBinderWrapper.wrap(rawBinder) as android.os.IBinder
+        val wrapper = ShizukuBinderWrapper(rawBinder)
 
         // Build the Parcel manually – same format as IActivityTaskManager.resizeTask(int, Rect)
         val data = android.os.Parcel.obtain()
