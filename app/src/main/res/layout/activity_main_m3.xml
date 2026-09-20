@@ -519,7 +519,7 @@
                             android:layout_weight="1"
                             android:layout_height="40dp"
                             android:layout_marginEnd="8dp"
-                            android:text="Shrink (3s)"
+                            android:text="Shrink (8s)"
                             android:textSize="12sp"
                             android:textColor="?attr/colorOnSurface" />
 
@@ -541,12 +541,24 @@
                         android:layout_marginTop="12dp">
 
                         <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnDockDumpTasks"
+                            style="@style/App_Button_Tonal"
+                            android:layout_width="0dp"
+                            android:layout_weight="1"
+                            android:layout_height="40dp"
+                            android:layout_marginEnd="8dp"
+                            android:text="Dump tasks"
+                            android:textSize="12sp"
+                            android:textColor="?attr/colorOnSurface" />
+
+                        <com.google.android.material.button.MaterialButton
                             android:id="@+id/btnDockCopyLog"
                             style="@style/Widget.Material3.Button.OutlinedButton"
-                            android:layout_width="wrap_content"
-                            android:layout_height="36dp"
+                            android:layout_width="0dp"
+                            android:layout_weight="1"
+                            android:layout_height="40dp"
                             android:text="Copy log"
-                            android:textSize="11sp"
+                            android:textSize="12sp"
                             android:textColor="?attr/colorOnSurfaceVariant"
                             app:strokeColor="?attr/colorOutlineVariant"
                             app:cornerRadius="12dp" />
@@ -554,15 +566,32 @@
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/btnDockClearLog"
                             style="@style/Widget.Material3.Button.OutlinedButton"
-                            android:layout_width="wrap_content"
-                            android:layout_height="36dp"
-                            android:layout_marginStart="8dp"
+                            android:layout_width="0dp"
+                            android:layout_weight="1"
+                            android:layout_height="40dp"
                             android:text="Clear"
-                            android:textSize="11sp"
+                            android:textSize="12sp"
                             android:textColor="?attr/colorOnSurfaceVariant"
                             app:strokeColor="?attr/colorOutlineVariant"
                             app:cornerRadius="12dp" />
                     </LinearLayout>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/dockSearchTermLayout"
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox.Dense"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:hint="Search term for dump (e.g. youtube)">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/etDockSearchTerm"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="youtube"
+                            android:textSize="12sp"
+                            android:singleLine="true" />
+                    </com.google.android.material.textfield.TextInputLayout>
 
                     <ScrollView
                         android:id="@+id/dockTestLogScroll"

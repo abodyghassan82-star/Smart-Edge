@@ -416,11 +416,11 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
             // Cancel any previous countdown
             dockTestCountdown?.let { dockTestHandler.removeCallbacks(it) }
 
-            appendDockLog("\n⏳ Shrink starting in 3 seconds — switch to your freeform window now…\n")
+            appendDockLog("\n⏳ Shrink starting in 8 seconds — switch to your freeform window now…\n")
             binding.btnDockShrink.isEnabled = false
-            binding.btnDockShrink.text = "3s…"
+            binding.btnDockShrink.text = "8s…"
 
-            var remaining = 3
+            var remaining = 8
             val tick = object : Runnable {
                 override fun run() {
                     remaining--
@@ -429,7 +429,7 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
                         dockTestHandler.postDelayed(this, 1000)
                     } else {
                         binding.btnDockShrink.isEnabled = true
-                        binding.btnDockShrink.text = "Shrink (3s)"
+                        binding.btnDockShrink.text = "Shrink (8s)"
                         val log = StringBuilder()
                         val summary = DockTestHelper.shrink(this@MainActivity, log)
                         appendDockLog(log.toString())
@@ -444,6 +444,14 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
         binding.btnDockRestore.setOnClickListener {
             val log = StringBuilder()
             val summary = DockTestHelper.restore(this, log)
+            appendDockLog(log.toString())
+            binding.root.showModernToast(summary)
+        }
+
+        binding.btnDockDumpTasks.setOnClickListener {
+            val searchTerm = binding.etDockSearchTerm.text?.toString()?.trim() ?: "youtube"
+            val log = StringBuilder()
+            val summary = DockTestHelper.dumpTasks(log, searchTerm)
             appendDockLog(log.toString())
             binding.root.showModernToast(summary)
         }

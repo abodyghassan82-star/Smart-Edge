@@ -131,41 +131,301 @@ object DockTestHelper {
         return summary
     }
 
+    /**
+     * Dump task info from dumpsys activity activities.
+     *
+     * [searchTerm] is matched case-insensitively against every line; matching lines
+     * are shown with 3 lines of surrounding context (capped at 60 lines).
+     *
+     * Appends the formatted dump to [log].  Returns a one-line summary for Toasts.
+     */
+    fun dumpTasks(log: StringBuilder, searchTerm: String = "youtube"): String {
+        log.appendLine("=== DUMP TASKS ===")
+
+        if (!checkShizuku(log)) {
+            return "Shizuku not ready"
+        }
+
+        val output = runShizukuCommand("dumpsys activity activities", log)
+        if (output == null) {
+            log.appendLine("dumpsys returned null")
+            return "dumpsys failed"
+        }
+        log.appendLine("dumpsys output length: ${output.length}")
+
+        val lines = output.lines()
+        val totalLines = lines.size
+
+        // ── (a) Task{...} blocks: show each Task{ line + next 6 lines ──
+        log.appendLine("\n── Task blocks (max 40) ──")
+        var taskBlockCount = 0
+        val taskStarts = mutableListOf<Int>()
+        for ((i, line) in lines.withIndex()) {
+            if (line.contains("Task{")) {
+                taskStarts.add(i)
+            }
+        }
+        for (start in taskStarts) {
+            if (taskBlockCount >= 40) {
+                log.appendLine("  ... (${taskStarts.size - taskBlockCount} more task blocks truncated)")
+                break
+            }
+            val end = minOf(start + 7, totalLines)
+            for (j in start until end) {
+                log.appendLine("  ${lines[j]}")
+            }
+            log.appendLine("  ---")
+            taskBlockCount++
+        }
+        if (taskStarts.isEmpty()) {
+            log.appendLine("  (no lines containing 'Task{' found)")
+        } else {
+            log.appendLine("  Total Task{ lines found: ${taskStarts.size}, shown: $taskBlockCount")
+        }
+
+        // ── (b) distinct windowing-mode tokens with counts ──
+        log.appendLine("\n── Windowing mode tokens ──")
+        val modePattern = Regex("(?i)(windowingMode|mWindowingMode|winMode|mode)=(\\S+)")
+        val modeCounts = mutableMapOf<String, Int>()
+        for (line in lines) {
+            for (m in modePattern.findAll(line)) {
+                val key = "${m.groupValues[1]}=${m.groupValues[2]}"
+                modeCounts[key] = (modeCounts[key] ?: 0) + 1
+            }
+        }
+        if (modeCounts.isEmpty()) {
+            log.appendLine("  (none found)")
+        } else {
+            for ((key, count) in modeCounts.entries.sortedByDescending { it.value }) {
+                log.appendLine("  $key  ×$count")
+            }
+        }
+
+        // ── (c) search term with 3-line context (capped at 60 lines) ──
+        log.appendLine("\n── Search: \"${searchTerm}\" (3-line context, max 60 lines) ──")
+        val lowerSearch = searchTerm.lowercase()
+        val matchedIndices = mutableSetOf<Int>()
+        for ((i, line) in lines.withIndex()) {
+            if (line.lowercase().contains(lowerSearch)) {
+                for (j in maxOf(0, i - 3) until minOf(totalLines, i + 4)) {
+                    matchedIndices.add(j)
+                }
+            }
+        }
+        if (matchedIndices.isEmpty()) {
+            log.appendLine("  (no matches)")
+        } else {
+            val sorted = matchedIndices.sorted()
+            val shown = sorted.take(60)
+            var prevIdx = -1
+            for (idx in shown) {
+                if (prevIdx >= 0 && idx > prevIdx + 1) {
+                    log.appendLine("  ...")
+                }
+                log.appendLine("  L${idx}: ${lines[idx]}")
+                prevIdx = idx
+            }
+            if (sorted.size > 60) {
+                log.appendLine("  ... (${sorted.size - 60} more lines truncated)")
+            }
+            log.appendLine("  Total matching lines: ${matchedIndices.size}")
+        }
+
+        // ── cap total at ~200 lines ──
+        val allOutput = log.toString()
+        val allLines = allOutput.lines()
+        if (allLines.size > 200) {
+            log.clear()
+            for (i in 0 until 195) {
+                log.appendLine(allLines[i])
+            }
+            log.appendLine("...")
+            log.appendLine("(truncated — ${allLines.size - 195} lines dropped)")
+        }
+
+        val summary = "Dump complete — ${totalLines} raw lines, " +
+            "${taskStarts.size} Task{ blocks, " +
+            "${modeCounts.size} distinct mode tokens, " +
+            "${matchedIndices.size} lines matching \"$searchTerm\""
+        log.appendLine("\n$summary")
+        Log.d(TAG, summary)
+        return summary
+    }
+
     // ── internals ──────────────────────────────────────────────────────────
+
+    // Case-insensitive patterns for freeform detection
+    private val FREEFORM_MODE_PATTERNS = listOf(
+        Regex("(?i)(?:windowingMode|mWindowingMode|winMode|mode)=freeform"),
+        Regex("(?i)(?:windowingMode|mWindowingMode|winMode|mode)=5\\b")
+    )
+
+    // Task ID patterns: "taskId=123" or "#123" inside a Task{ line
+    private val TASK_ID_PATTERNS = listOf(
+        Regex("taskId=(\\d+)"),
+        Regex("#(\\d+)")
+    )
+
+    // Bounds patterns: "Rect(l, t, r, b)" or "[l,t][r,b]" (digits may have commas)
+    private val BOUNDS_PATTERNS = listOf(
+        Regex("Rect\\(\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\)"),
+        Regex("\\[(-?\\d+),(-?\\d+)\\]\\[(-?\\d+),(-?\\d+)\\]")
+    )
 
     private fun findTopFreeformTask(log: StringBuilder): TaskInfo? {
         val output = runShizukuCommand("dumpsys activity activities", log) ?: return null
         log.appendLine("dumpsys output length: ${output.length}")
 
-        var lastTaskId: Int? = null
-        var lastTaskBounds: Rect? = null
-        var linesSinceTaskId = 0
+        val lines = output.lines()
+        val totalLines = lines.size
 
-        for (line in output.lines()) {
-            val taskIdMatch = Regex("taskId=(\\d+)").find(line)
-            if (taskIdMatch != null) {
-                lastTaskId = taskIdMatch.groupValues[1].toIntOrNull()
-                linesSinceTaskId = 0
-                lastTaskBounds = extractBounds(line)
-            } else {
-                linesSinceTaskId++
-            }
+        // First pass: find all Task{ blocks.  A block starts at a line containing
+        // "Task{" and ends at the next "Task{" or end-of-output.  Within each block
+        // we look for a task ID and freeform mode.
+        data class TaskBlock(val startLine: Int, val taskId: Int?, val isFreeform: Boolean, val bounds: Rect?, val matchDetail: String)
 
-            if (lastTaskId != null && linesSinceTaskId < 6 && "windowingMode=5" in line) {
-                val bounds = lastTaskBounds ?: extractBounds(line)
-                log.appendLine("Freeform task found: taskId=$lastTaskId  bounds=$bounds")
-                return TaskInfo(lastTaskId, bounds ?: Rect())
+        val blocks = mutableListOf<TaskBlock>()
+        val taskStarts = mutableListOf<Int>()
+        for ((i, line) in lines.withIndex()) {
+            if (line.contains("Task{")) {
+                taskStarts.add(i)
             }
         }
 
-        log.appendLine("No freeform task found in dumpsys output")
-        return null
+        if (taskStarts.isEmpty()) {
+            // No Task{ lines at all — try flat scan as last resort
+            log.appendLine("No 'Task{' lines found, scanning flat...")
+            return flatScan(lines, log)
+        }
+
+        log.appendLine("Found ${taskStarts.size} Task{ blocks")
+
+        for (blockIdx in taskStarts.indices) {
+            val start = taskStarts[blockIdx]
+            val end = if (blockIdx + 1 < taskStarts.size) taskStarts[blockIdx + 1] else totalLines
+
+            var taskId: Int? = null
+            var isFreeform = false
+            var bounds: Rect? = null
+            var matchDetail = ""
+
+            for (i in start until end) {
+                val line = lines[i]
+
+                // Extract task ID if not yet found
+                if (taskId == null) {
+                    for (pat in TASK_ID_PATTERNS) {
+                        val m = pat.find(line)
+                        if (m != null) {
+                            taskId = m.groupValues[1].toIntOrNull()
+                            if (taskId != null) break
+                        }
+                    }
+                }
+
+                // Check freeform
+                if (!isFreeform) {
+                    for (pat in FREEFORM_MODE_PATTERNS) {
+                        val m = pat.find(line)
+                        if (m != null) {
+                            isFreeform = true
+                            matchDetail = "matched \"${m.value}\" on line ${i + 1}"
+                            break
+                        }
+                    }
+                }
+
+                // Extract bounds if not yet found
+                if (bounds == null) {
+                    for (pat in BOUNDS_PATTERNS) {
+                        val m = pat.find(line)
+                        if (m != null) {
+                            val l = m.groupValues[1].toIntOrNull() ?: 0
+                            val t = m.groupValues[2].toIntOrNull() ?: 0
+                            val r = m.groupValues[3].toIntOrNull() ?: 0
+                            val b = m.groupValues[4].toIntOrNull() ?: 0
+                            bounds = Rect(l, t, r, b)
+                            break
+                        }
+                    }
+                }
+            }
+
+            blocks.add(TaskBlock(start, taskId, isFreeform, bounds, matchDetail))
+        }
+
+        // Find the last freeform block (topmost = most recent)
+        val freeformBlocks = blocks.filter { it.isFreeform }
+        if (freeformBlocks.isEmpty()) {
+            log.appendLine("No freeform task found among ${blocks.size} Task{ blocks")
+            // Log what we did find for debugging
+            for (b in blocks.takeLast(5)) {
+                log.appendLine("  Task block at L${b.startLine}: taskId=${b.taskId} freeform=false")
+            }
+            return null
+        }
+
+        val best = freeformBlocks.last()
+        log.appendLine("Freeform task found: taskId=${best.taskId}  bounds=${best.bounds}")
+        log.appendLine("  ${best.matchDetail}")
+        return TaskInfo(best.taskId ?: 0, best.bounds ?: Rect())
     }
 
-    private fun extractBounds(line: String): Rect? {
-        val m = Regex("\\[(\\d+),(\\d+)]\\[(\\d+),(\\d+)]").find(line) ?: return null
-        val (l, t, r, b) = m.destructured
-        return Rect(l.toInt(), t.toInt(), r.toInt(), b.toInt())
+    /**
+     * Last-resort flat scan when no Task{ lines exist.
+     * Searches the entire output for freeform tokens + nearby task IDs.
+     */
+    private fun flatScan(lines: List<String>, log: StringBuilder): TaskInfo? {
+        log.appendLine("Flat scan: searching all ${lines.size} lines for freeform tokens...")
+        var lastTaskId: Int? = null
+        var lastTaskBounds: Rect? = null
+        var linesSinceTaskId = 0
+        var scannedFreeformLines = 0
+
+        for ((i, line) in lines.withIndex()) {
+            // Track task IDs
+            var foundId = false
+            for (pat in TASK_ID_PATTERNS) {
+                val m = pat.find(line)
+                if (m != null) {
+                    lastTaskId = m.groupValues[1].toIntOrNull()
+                    linesSinceTaskId = 0
+                    foundId = true
+                    break
+                }
+            }
+            if (!foundId) {
+                linesSinceTaskId++
+            }
+
+            // Track bounds
+            for (pat in BOUNDS_PATTERNS) {
+                val m = pat.find(line)
+                if (m != null) {
+                    val l = m.groupValues[1].toIntOrNull() ?: 0
+                    val t = m.groupValues[2].toIntOrNull() ?: 0
+                    val r = m.groupValues[3].toIntOrNull() ?: 0
+                    val b = m.groupValues[4].toIntOrNull() ?: 0
+                    lastTaskBounds = Rect(l, t, r, b)
+                    break
+                }
+            }
+
+            // Check freeform
+            for (pat in FREEFORM_MODE_PATTERNS) {
+                if (pat.containsMatchIn(line)) {
+                    scannedFreeformLines++
+                    if (lastTaskId != null && linesSinceTaskId < 10) {
+                        val bounds = lastTaskBounds ?: Rect()
+                        log.appendLine("  Flat scan: taskId=$lastTaskId  bounds=$bounds  (freeform at line ${i + 1})")
+                        return TaskInfo(lastTaskId, bounds)
+                    }
+                }
+            }
+        }
+
+        log.appendLine("  Flat scan: found $scannedFreeformLines freeform tokens, but no task ID within 10 lines")
+        return null
     }
 
     private fun tryResizeMethods(taskId: Int, bounds: Rect, log: StringBuilder): Pair<Boolean, String> {
