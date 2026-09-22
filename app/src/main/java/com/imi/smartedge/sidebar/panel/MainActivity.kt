@@ -456,6 +456,14 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
             binding.root.showModernToast(summary)
         }
 
+        binding.btnDockCloseOrphans.setOnClickListener {
+            val target = binding.etDockSearchTerm.text?.toString()?.trim()?.takeIf { it.isNotEmpty() } ?: "youtube"
+            val log = StringBuilder()
+            val summary = DockTestHelper.closeOrphanFreeformTasks(log, target)
+            appendDockLog(log.toString())
+            binding.root.showModernToast(summary)
+        }
+
         binding.btnDockCopyLog.setOnClickListener {
             val text = binding.tvDockTestLog.text?.toString() ?: ""
             val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager

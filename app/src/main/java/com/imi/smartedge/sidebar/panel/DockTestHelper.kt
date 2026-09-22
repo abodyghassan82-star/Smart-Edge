@@ -69,7 +69,7 @@ object DockTestHelper {
             return "Shizuku not ready"
         }
 
-        val task = findTopFreeformTask(log)
+        val task = findTopFreeformTask(context, log)
         if (task == null) {
             val msg = "No freeform task found – open an app in freeform first"
             log.appendLine(msg)
@@ -252,6 +252,121 @@ object DockTestHelper {
         return summary
     }
 
+    /**
+     * Remove every freeform task whose package matches [targetPackage] except
+     * the topmost one (first in "Application tokens in top down Z order").
+     * Removal uses Shizuku shell `am task remove` / `cmd activity remove-task`
+     * (whichever exists on this ROM — determined on the first attempt).
+     * Full log is appended to [log]. Returns a one-line summary for Toasts.
+     */
+    fun closeOrphanFreeformTasks(log: StringBuilder, targetPackage: String = "youtube"): String {
+        log.appendLine("=== CLOSE ORPHAN FREEFORM TASKS ===")
+        log.appendLine("Target package filter: $targetPackage")
+
+        if (!checkShizuku(log)) {
+            return "Shizuku not ready"
+        }
+
+        val output = runShizukuCommand("dumpsys activity activities", log)
+        if (output == null) {
+            log.appendLine("dumpsys returned null")
+            return "dumpsys failed"
+        }
+        val lines = output.lines()
+
+        val blocks = parseTaskBlocks(lines)
+        if (blocks.isEmpty()) {
+            log.appendLine("No Task{ blocks found in dump")
+            return "No tasks found"
+        }
+
+        val freeformAll = blocks.filter { it.isFreeform && it.taskId != null }
+        log.appendLine("Freeform tasks in dump: ${freeformAll.size}")
+
+        fun matchesTarget(b: TaskBlock): Boolean =
+            b.pkg?.contains(targetPackage, ignoreCase = true) == true ||
+                b.blockText.contains(targetPackage, ignoreCase = true)
+
+        val matched = freeformAll.filter { matchesTarget(it) }
+        if (matched.isEmpty()) {
+            log.appendLine("No freeform tasks match \"$targetPackage\"")
+            for (b in freeformAll) {
+                log.appendLine("  taskId=${b.taskId} pkg=${b.pkg ?: "?"} bounds=${b.bounds ?: "?"}")
+            }
+            return "No freeform tasks for \"$targetPackage\""
+        }
+
+        val zOrder = parseZOrderTaskIds(lines, log)
+        for (b in matched) {
+            val zi = b.taskId?.let { zOrder.indexOf(it) } ?: -1
+            val zText = if (zi >= 0) "zOrder=#$zi" else "zOrder=not-listed"
+            log.appendLine("matched: taskId=${b.taskId} pkg=${b.pkg ?: "?"} bounds=${b.bounds ?: "?"} $zText")
+        }
+
+        val top = pickTopmost(matched, zOrder)
+        val keptId = top?.taskId
+        if (keptId == null) {
+            log.appendLine("Could not determine topmost task – aborting")
+            return "Could not determine topmost task"
+        }
+        val others = matched.filter { it.taskId != keptId }
+        log.appendLine("Keeping topmost taskId=$keptId; ${others.size} orphan(s) to remove")
+        if (others.isEmpty()) {
+            val msg = "No orphans – only topmost freeform task $keptId exists"
+            log.appendLine(msg)
+            return msg
+        }
+
+        // Learned on the first attempt: whichever remove command actually
+        // exists on this ROM is tried first for the remaining tasks.
+        var preferCmdActivity = false
+
+        fun attemptRemove(id: Int): Boolean {
+            val commands = if (preferCmdActivity) {
+                listOf("cmd activity remove-task $id", "am task remove $id")
+            } else {
+                listOf("am task remove $id", "cmd activity remove-task $id")
+            }
+            for (cmd in commands) {
+                log.appendLine("  trying: $cmd")
+                val out = runShizukuCommand(cmd, log)
+                log.appendLine("    output: ${out?.trim()?.take(300) ?: "null"}")
+                if (out != null && !looksLikeError(out)) {
+                    preferCmdActivity = cmd.startsWith("cmd activity")
+                    log.appendLine("    → $cmd succeeded")
+                    return true
+                }
+                log.appendLine("    → $cmd failed")
+            }
+            log.appendLine("    → both remove commands failed for taskId=$id")
+            return false
+        }
+
+        var removed = 0
+        var failed = 0
+        for (b in others) {
+            val id = b.taskId ?: continue
+            log.appendLine("Removing orphan taskId=$id pkg=${b.pkg ?: "?"} bounds=${b.bounds ?: "?"}")
+            if (attemptRemove(id)) removed++ else failed++
+        }
+
+        // Verify with a fresh dump
+        log.appendLine("Verifying after removal...")
+        val output2 = runShizukuCommand("dumpsys activity activities", log)
+        if (output2 != null) {
+            val remaining = parseTaskBlocks(output2.lines()).filter {
+                it.isFreeform && it.taskId != null && matchesTarget(it)
+            }
+            val rem = remaining.joinToString(", ") { "taskId=${it.taskId}" }
+            log.appendLine("Remaining freeform \"$targetPackage\" tasks: ${if (rem.isEmpty()) "(none)" else rem}")
+        }
+
+        val summary = "Closed $removed orphan freeform task(s), $failed failed – kept topmost taskId=$keptId"
+        log.appendLine(summary)
+        Log.d(TAG, summary)
+        return summary
+    }
+
     // ── internals ──────────────────────────────────────────────────────────
 
     // Case-insensitive patterns for freeform detection
@@ -272,19 +387,18 @@ object DockTestHelper {
         Regex("\\[(-?\\d+),(-?\\d+)\\]\\[(-?\\d+),(-?\\d+)\\]")
     )
 
-    private fun findTopFreeformTask(log: StringBuilder): TaskInfo? {
-        val output = runShizukuCommand("dumpsys activity activities", log) ?: return null
-        log.appendLine("dumpsys output length: ${output.length}")
+    private data class TaskBlock(
+        val startLine: Int,
+        val taskId: Int?,
+        val isFreeform: Boolean,
+        val bounds: Rect?,
+        val pkg: String?,
+        val blockText: String,
+        val matchDetail: String
+    )
 
-        val lines = output.lines()
+    private fun parseTaskBlocks(lines: List<String>): List<TaskBlock> {
         val totalLines = lines.size
-
-        // First pass: find all Task{ blocks.  A block starts at a line containing
-        // "Task{" and ends at the next "Task{" or end-of-output.  Within each block
-        // we look for a task ID and freeform mode.
-        data class TaskBlock(val startLine: Int, val taskId: Int?, val isFreeform: Boolean, val bounds: Rect?, val matchDetail: String)
-
-        val blocks = mutableListOf<TaskBlock>()
         val taskStarts = mutableListOf<Int>()
         for ((i, line) in lines.withIndex()) {
             if (line.contains("Task{")) {
@@ -292,14 +406,7 @@ object DockTestHelper {
             }
         }
 
-        if (taskStarts.isEmpty()) {
-            // No Task{ lines at all — try flat scan as last resort
-            log.appendLine("No 'Task{' lines found, scanning flat...")
-            return flatScan(lines, log)
-        }
-
-        log.appendLine("Found ${taskStarts.size} Task{ blocks")
-
+        val blocks = mutableListOf<TaskBlock>()
         for (blockIdx in taskStarts.indices) {
             val start = taskStarts[blockIdx]
             val end = if (blockIdx + 1 < taskStarts.size) taskStarts[blockIdx + 1] else totalLines
@@ -351,11 +458,107 @@ object DockTestHelper {
                 }
             }
 
-            blocks.add(TaskBlock(start, taskId, isFreeform, bounds, matchDetail))
+            val blockText = lines.subList(start, end).joinToString("\n")
+            blocks.add(TaskBlock(start, taskId, isFreeform, bounds, extractPackage(blockText), blockText, matchDetail))
+        }
+        return blocks
+    }
+
+    private fun extractPackage(blockText: String): String? =
+        Regex("A=\\d+:([\\w.]+)").find(blockText)?.groupValues?.get(1)
+            ?: Regex("ActivityRecord\\{\\S+\\s+u\\d+\\s+([\\w.]+)/").find(blockText)?.groupValues?.get(1)
+
+    /**
+     * Parse task IDs in top-down Z order from the
+     * "Application tokens in top down Z order" section of the dump.
+     * The FIRST ID is the topmost / most recent task.
+     */
+    private fun parseZOrderTaskIds(lines: List<String>, log: StringBuilder): List<Int> {
+        val headerIdx = lines.indexOfFirst { it.contains("Application tokens in top down Z order") }
+        if (headerIdx < 0) {
+            log.appendLine("'Application tokens in top down Z order' section not found in dump")
+            return emptyList()
         }
 
-        // Find the last freeform block (topmost = most recent)
-        val freeformBlocks = blocks.filter { it.isFreeform }
+        val ids = mutableListOf<Int>()
+        for (i in (headerIdx + 1) until lines.size) {
+            val line = lines[i]
+            if (line.isBlank()) continue
+            val startsAtCol0 = !line.startsWith(" ") && !line.startsWith("\t")
+            if (startsAtCol0 && !line.trimStart().startsWith("*")) {
+                // Next top-level dumpsys section begins — stop.
+                break
+            }
+            val m = Regex("\\bt(\\d+)\\}").find(line) ?: Regex("taskId=(\\d+)").find(line)
+            val id = m?.groupValues?.get(1)?.toIntOrNull()
+            if (id != null && id !in ids) ids.add(id)
+        }
+
+        if (ids.isEmpty()) {
+            log.appendLine("Z-order (top→bottom): (no task IDs parsed)")
+        } else {
+            val shown = ids.take(30).joinToString(", ")
+            val more = if (ids.size > 30) " …(${ids.size} total)" else ""
+            log.appendLine("Z-order (top→bottom): $shown$more")
+        }
+        return ids
+    }
+
+    private fun isMostlyOffScreen(bounds: Rect, screenW: Int, screenH: Int): Boolean =
+        bounds.left !in 0..screenW ||
+        bounds.top !in 0..screenH ||
+        bounds.right !in 0..screenW ||
+        bounds.bottom !in 0..screenH
+
+    /**
+     * Pick the candidate appearing FIRST in the Z-order list (topmost/most
+     * recent). Falls back to the last Task{ block (legacy behaviour) when no
+     * candidate appears in the Z-order section.
+     */
+    private fun pickTopmost(candidates: List<TaskBlock>, zOrder: List<Int>): TaskBlock? {
+        if (candidates.isEmpty()) return null
+        val ranked = candidates.mapNotNull { b ->
+            val id = b.taskId ?: return@mapNotNull null
+            val idx = zOrder.indexOf(id)
+            if (idx >= 0) idx to b else null
+        }
+        if (ranked.isNotEmpty()) return ranked.minByOrNull { it.first }!!.second
+        return candidates.last()
+    }
+
+    private fun findTopFreeformTask(context: Context, log: StringBuilder): TaskInfo? {
+        val output = runShizukuCommand("dumpsys activity activities", log) ?: return null
+        log.appendLine("dumpsys output length: ${output.length}")
+
+        val lines = output.lines()
+        val blocks = parseTaskBlocks(lines)
+
+        if (blocks.isEmpty()) {
+            // No Task{ lines at all — try flat scan as last resort
+            log.appendLine("No 'Task{' lines found, scanning flat...")
+            return flatScan(lines, log)
+        }
+
+        log.appendLine("Found ${blocks.size} Task{ blocks")
+
+        // Display bounds: prefer init=WxH from the dump itself
+        val initMatch = Regex("init=(\\d+)x(\\d+)").find(output)
+        val screenW: Int
+        val screenH: Int
+        if (initMatch != null) {
+            screenW = initMatch.groupValues[1].toInt()
+            screenH = initMatch.groupValues[2].toInt()
+            log.appendLine("Display size: ${screenW}x$screenH (from init=WxH)")
+        } else {
+            val dm = context.resources.displayMetrics
+            screenW = dm.widthPixels
+            screenH = dm.heightPixels
+            log.appendLine("Display size: ${screenW}x$screenH (init=WxH not in dump, using displayMetrics)")
+        }
+
+        val zOrder = parseZOrderTaskIds(lines, log)
+
+        val freeformBlocks = blocks.filter { it.isFreeform && it.taskId != null }
         if (freeformBlocks.isEmpty()) {
             log.appendLine("No freeform task found among ${blocks.size} Task{ blocks")
             // Log what we did find for debugging
@@ -365,8 +568,31 @@ object DockTestHelper {
             return null
         }
 
-        val best = freeformBlocks.last()
-        log.appendLine("Freeform task found: taskId=${best.taskId}  bounds=${best.bounds}")
+        val onScreen = mutableListOf<TaskBlock>()
+        for (b in freeformBlocks) {
+            val bounds = b.bounds
+            if (bounds != null && isMostlyOffScreen(bounds, screenW, screenH)) {
+                log.appendLine("skipped (off-screen orphan): taskId=${b.taskId} bounds=$bounds pkg=${b.pkg ?: "?"}")
+                continue
+            }
+            val zi = b.taskId?.let { zOrder.indexOf(it) } ?: -1
+            val zText = if (zi >= 0) "zOrder=#$zi" else "zOrder=not-listed"
+            log.appendLine("candidate: taskId=${b.taskId} bounds=${bounds ?: "?"} pkg=${b.pkg ?: "?"} $zText")
+            onScreen.add(b)
+        }
+
+        if (onScreen.isEmpty()) {
+            log.appendLine("All ${freeformBlocks.size} freeform task(s) are off-screen orphans – none usable")
+            return null
+        }
+
+        val best = pickTopmost(onScreen, zOrder) ?: return null
+        val bestZ = best.taskId?.let { zOrder.indexOf(it) } ?: -1
+        if (bestZ >= 0) {
+            log.appendLine("Selected taskId=${best.taskId} – first in 'Application tokens in top down Z order' (#$bestZ of ${zOrder.size})")
+        } else {
+            log.appendLine("Selected taskId=${best.taskId} – not in Z-order; legacy fallback (last freeform Task{ block)")
+        }
         log.appendLine("  ${best.matchDetail}")
         return TaskInfo(best.taskId ?: 0, best.bounds ?: Rect())
     }
