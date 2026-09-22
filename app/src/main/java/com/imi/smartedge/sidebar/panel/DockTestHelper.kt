@@ -436,7 +436,8 @@ object DockTestHelper {
         val out1 = runShizukuCommand(cmd1, log)
         log.appendLine("  output: $out1")
         if (out1 != null && !looksLikeError(out1)) {
-            return true to "method 1 (cmd activity task resize) succeeded"
+            val redraw = forceRedrawViaHiddenApi(taskId, bounds, log)
+            return true to "method 1 (cmd activity task resize) succeeded; $redraw"
         }
 
         val cmd2 = "am task resize $taskId $cmd"
@@ -475,6 +476,33 @@ object DockTestHelper {
                "unknown command" in lower ||
                "can't find" in lower ||
                "no such" in lower
+    }
+
+    /**
+     * Follow-up after a successful shell resize: `cmd activity task resize`
+     * can report success without the app visibly redrawing, so retry through
+     * the ShizukuBinderWrapper hidden-API path (IActivityTaskManager.resizeTask).
+     * Returns a one-line result description for the summary.
+     */
+    private fun forceRedrawViaHiddenApi(taskId: Int, bounds: Rect, log: StringBuilder): String {
+        log.appendLine("Shell resize succeeded but may not force a redraw — retrying via hidden API")
+        log.appendLine("Trying method 1b: ShizukuBinderWrapper IActivityTaskManager.resizeTask")
+        return try {
+            val ok = resizeViaHiddenApi(taskId, bounds)
+            val msg = if (ok) {
+                "method 1b (IActivityTaskManager.resizeTask) succeeded"
+            } else {
+                "method 1b (IActivityTaskManager.resizeTask) returned false"
+            }
+            log.appendLine("  $msg")
+            Log.d(TAG, msg)
+            msg
+        } catch (e: Exception) {
+            val msg = "method 1b (IActivityTaskManager.resizeTask) failed: ${e.message}"
+            log.appendLine("  $msg")
+            Log.e(TAG, msg, e)
+            msg
+        }
     }
 
     private fun resizeViaHiddenApi(taskId: Int, bounds: Rect): Boolean {
