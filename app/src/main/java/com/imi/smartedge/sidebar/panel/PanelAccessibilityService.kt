@@ -93,6 +93,8 @@ class PanelAccessibilityService : AccessibilityService() {
                     } else {
                         // Freeform launch doesn't need the toggle action
                         SplitScreenHelper.launchApp(this, pkg, mode)
+                        // Phase B: track the new freeform task and show the dock header
+                        DockManager.onFreeformLaunched(this, pkg)
                     }
                 }
             }
