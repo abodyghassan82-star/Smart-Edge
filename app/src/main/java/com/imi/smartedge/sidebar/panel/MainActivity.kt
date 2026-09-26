@@ -439,9 +439,14 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
                         binding.btnDockShrink.text = "Shrink (8s)"
                         val log = StringBuilder()
                         val targetPkg = binding.etDockSearchTerm.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-                        val summary = DockTestHelper.shrink(this@MainActivity, log, targetPkg)
-                        appendDockLog(log.toString())
-                        binding.root.showModernToast(summary)
+                        // Background: shrink now verifies the resize (sleeps + dumpsys).
+                        Thread {
+                            val summary = DockTestHelper.shrink(this@MainActivity, log, targetPkg)
+                            runOnUiThread {
+                                appendDockLog(log.toString())
+                                binding.root.showModernToast(summary)
+                            }
+                        }.start()
                     }
                 }
             }
@@ -451,9 +456,14 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
 
         binding.btnDockRestore.setOnClickListener {
             val log = StringBuilder()
-            val summary = DockTestHelper.restore(this, log)
-            appendDockLog(log.toString())
-            binding.root.showModernToast(summary)
+            // Background: restore now verifies the resize (sleeps + dumpsys).
+            Thread {
+                val summary = DockTestHelper.restore(this@MainActivity, log)
+                runOnUiThread {
+                    appendDockLog(log.toString())
+                    binding.root.showModernToast(summary)
+                }
+            }.start()
         }
 
         binding.btnDockDumpTasks.setOnClickListener {

@@ -162,6 +162,26 @@ class BubbleOverlayView(context: Context) : View(context) {
         super.onAttachedToWindow()
         DockTestHelper.fileLog(context, "BubbleTouch",
             "onAttachedToWindow — bubble connected hash=${hashCode()}")
+        // Enter: scale + fade pop.
+        scaleX = 0.6f
+        scaleY = 0.6f
+        alpha = 0f
+        animate().cancel()
+        animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(170L).start()
+    }
+
+    /**
+     * Exit: fade + shrink, then run [onEnd] (window removal).  A 300 ms
+     * safety post guarantees [onEnd] even if the animation is cancelled —
+     * callers must make [onEnd] idempotent (guard on isAttachedToWindow),
+     * since it may run twice.  See HeaderOverlayView.animateOut.
+     */
+    fun animateOut(onEnd: () -> Unit) {
+        if (!isAttachedToWindow) { onEnd(); return }
+        animate().cancel()
+        animate().alpha(0f).scaleX(0.6f).scaleY(0.6f).setDuration(140L)
+            .withEndAction { onEnd() }.start()
+        postDelayed({ onEnd() }, 300L)
     }
 
     private fun bubbleRect(): RectF {

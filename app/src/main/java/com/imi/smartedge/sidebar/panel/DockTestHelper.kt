@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.util.Log
+import kotlin.math.abs
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuBinderWrapper
 import java.io.File
@@ -381,6 +382,9 @@ object DockTestHelper {
     /** A freeform task selected for docking. */
     data class DockTask(val taskId: Int, val bounds: Rect, val pkg: String?)
 
+    /** One dumpsys read: window rectangle + `visible=` flag for a task. */
+    data class TaskSnapshot(val bounds: Rect, val visible: Boolean)
+
     /** Result of a dock (shrink-to-bubble) operation. */
     data class DockResult(
         val taskId: Int,
@@ -514,23 +518,29 @@ object DockTestHelper {
     }
 
     /**
-     * Quiet bounds probe for the header/bubble follow loop.  Returns the
-     * task's current bounds, an EMPTY Rect when the task exists but its
-     * bounds could not be parsed, or null when the task is gone / the dump
-     * failed (caller should require several consecutive nulls before
-     * treating the task as closed).  Runs shell commands — call from a
-     * background thread.
+     * Quiet bounds + visibility probe for the header/bubble follow loop.
+     * Returns null when the task is gone / the dump failed (caller should
+     * require several consecutive nulls before treating the task as closed),
+     * an EMPTY bounds Rectangle when the task exists but its rectangle could
+     * not be parsed, and `visible=true` when the dump carries no visibility
+     * flag on the bounds block (safe default: the bar stays shown).
+     * Runs shell commands — call from a background thread.
      */
-    fun queryTaskBounds(taskId: Int): Rect? {
+    fun queryTaskSnapshot(taskId: Int): TaskSnapshot? {
         val quiet = StringBuilder()
         val output = runShizukuCommand("dumpsys activity activities", quiet) ?: return null
         val blocks = parseTaskBlocks(output.lines()).filter { it.taskId == taskId }
         if (blocks.isEmpty()) return null
         // Same task id appears in multiple dump sections; summary blocks have
-        // no bounds line — only a block with a real rectangle is trustworthy.
+        // no bounds line — only the block with a real rectangle is trustworthy,
+        // and its visible= flag is the one we honour (wrong-section flags would
+        // hide/show the bar incorrectly).
         val usable = blocks.firstOrNull { hasUsableBounds(it.bounds) }
-        return usable?.bounds ?: Rect()
+        return TaskSnapshot(usable?.bounds ?: Rect(), usable?.visible ?: true)
     }
+
+    /** Bounds-only view of [queryTaskSnapshot] (null = task gone / dump failed). */
+    fun queryTaskBounds(taskId: Int): Rect? = queryTaskSnapshot(taskId)?.bounds
 
     /** The bubble shrink target: 160×160 dp near the right edge (matches shrink()). */
     fun computeBubbleBounds(context: Context): Rect {
@@ -660,11 +670,15 @@ object DockTestHelper {
         Regex("\\[(-?\\d+),(-?\\d+)\\]\\[(-?\\d+),(-?\\d+)\\]")
     )
 
+    // Window visibility: "visible=true|false" — NOT "visibleRequested=".
+    private val VISIBLE_PATTERN = Regex("\\bvisible=(true|false)\\b")
+
     private data class TaskBlock(
         val startLine: Int,
         val taskId: Int?,
         val isFreeform: Boolean,
         val bounds: Rect?,
+        val visible: Boolean?,
         val pkg: String?,
         val blockText: String,
         val matchDetail: String
@@ -687,6 +701,7 @@ object DockTestHelper {
             var taskId: Int? = null
             var isFreeform = false
             var bounds: Rect? = null
+            var visible: Boolean? = null
             var matchDetail = ""
 
             for (i in start until end) {
@@ -729,10 +744,16 @@ object DockTestHelper {
                         }
                     }
                 }
+
+                // Extract window visibility if not yet found
+                if (visible == null) {
+                    val vm = VISIBLE_PATTERN.find(line)
+                    if (vm != null) visible = vm.groupValues[1] == "true"
+                }
             }
 
             val blockText = lines.subList(start, end).joinToString("\n")
-            blocks.add(TaskBlock(start, taskId, isFreeform, bounds, extractPackage(blockText), blockText, matchDetail))
+            blocks.add(TaskBlock(start, taskId, isFreeform, bounds, visible, extractPackage(blockText), blockText, matchDetail))
         }
         return blocks
     }
@@ -946,8 +967,10 @@ object DockTestHelper {
         val out1 = runShizukuCommand(cmd1, log)
         log.appendLine("  output: $out1")
         if (out1 != null && !looksLikeError(out1)) {
-            val redraw = forceRedrawViaHiddenApi(taskId, bounds, log)
-            return true to "method 1 (cmd activity task resize) succeeded; $redraw"
+            if (verifyResize(taskId, bounds, log, 1)) {
+                return true to "method 1 (cmd activity task resize) succeeded (verified)"
+            }
+            log.appendLine("  method 1 reported success but the window did not move — trying next")
         }
 
         val cmd2 = "am task resize $taskId $cmd"
@@ -955,14 +978,20 @@ object DockTestHelper {
         val out2 = runShizukuCommand(cmd2, log)
         log.appendLine("  output: $out2")
         if (out2 != null && !looksLikeError(out2)) {
-            return true to "method 2 (am task resize) succeeded"
+            if (verifyResize(taskId, bounds, log, 2)) {
+                return true to "method 2 (am task resize) succeeded (verified)"
+            }
+            log.appendLine("  method 2 reported success but the window did not move — trying next")
         }
 
         log.appendLine("Trying method 3: ShizukuBinderWrapper IActivityTaskManager.resizeTask")
         try {
             val result = resizeViaHiddenApi(taskId, bounds)
             if (result) {
-                return true to "method 3 (IActivityTaskManager.resizeTask) succeeded"
+                if (verifyResize(taskId, bounds, log, 3)) {
+                    return true to "method 3 (IActivityTaskManager.resizeTask) succeeded (verified)"
+                }
+                log.appendLine("  method 3 reported success but the window did not move")
             }
         } catch (e: Exception) {
             log.appendLine("  Method 3 exception: ${e.message}")
@@ -972,9 +1001,35 @@ object DockTestHelper {
         val errors = buildList {
             out1?.let { add("1: ${it.take(80)}") }
             out2?.let { add("2: ${it.take(80)}") }
-            add("3: hidden API failed")
+            add("3: hidden API failed or unverified")
         }
-        return false to "all methods failed – ${errors.joinToString("; ")}"
+        return false to "all methods failed or unverified – ${errors.joinToString("; ")}"
+    }
+
+    /**
+     * Verify that a reported-successful resize actually moved the window:
+     * wait for the WM to apply it, re-read the task bounds from dumpsys and
+     * compare against [target] (±48 px per edge).  A second read 400 ms
+     * later accepts a slow-but-moving window; "unmoved" means the command
+     * lied and the caller must not report success.  Blocks ~450–850 ms —
+     * runs inside [tryResizeMethods] (background threads only).
+     */
+    private fun verifyResize(taskId: Int, target: Rect, log: StringBuilder, method: Int): Boolean {
+        Thread.sleep(450)
+        val first = queryTaskBounds(taskId)
+        log.appendLine("  verify m$method #1: actual=${first ?: "null"} target=$target")
+        if (first != null && boundsApproximately(first, target)) return true
+        Thread.sleep(400)
+        val second = queryTaskBounds(taskId)
+        log.appendLine("  verify m$method #2: actual=${second ?: "null"} target=$target")
+        return second != null && boundsApproximately(second, target)
+    }
+
+    /** True when the two rectangles match within 48 px on every edge. */
+    private fun boundsApproximately(a: Rect, b: Rect): Boolean {
+        val tol = 48
+        return abs(a.left - b.left) <= tol && abs(a.top - b.top) <= tol &&
+            abs(a.right - b.right) <= tol && abs(a.bottom - b.bottom) <= tol
     }
 
     private fun looksLikeError(output: String): Boolean {
@@ -986,33 +1041,6 @@ object DockTestHelper {
                "unknown command" in lower ||
                "can't find" in lower ||
                "no such" in lower
-    }
-
-    /**
-     * Follow-up after a successful shell resize: `cmd activity task resize`
-     * can report success without the app visibly redrawing, so retry through
-     * the ShizukuBinderWrapper hidden-API path (IActivityTaskManager.resizeTask).
-     * Returns a one-line result description for the summary.
-     */
-    private fun forceRedrawViaHiddenApi(taskId: Int, bounds: Rect, log: StringBuilder): String {
-        log.appendLine("Shell resize succeeded but may not force a redraw — retrying via hidden API")
-        log.appendLine("Trying method 1b: ShizukuBinderWrapper IActivityTaskManager.resizeTask")
-        return try {
-            val ok = resizeViaHiddenApi(taskId, bounds)
-            val msg = if (ok) {
-                "method 1b (IActivityTaskManager.resizeTask) succeeded"
-            } else {
-                "method 1b (IActivityTaskManager.resizeTask) returned false"
-            }
-            log.appendLine("  $msg")
-            Log.d(TAG, msg)
-            msg
-        } catch (e: Exception) {
-            val msg = "method 1b (IActivityTaskManager.resizeTask) failed: ${e.message}"
-            log.appendLine("  $msg")
-            Log.e(TAG, msg, e)
-            msg
-        }
     }
 
     /**

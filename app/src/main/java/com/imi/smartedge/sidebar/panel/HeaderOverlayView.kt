@@ -129,6 +129,25 @@ class HeaderOverlayView(context: Context) : View(context) {
         super.onAttachedToWindow()
         DockTestHelper.fileLog(context, "HeaderTouch",
             "onAttachedToWindow — view connected to the window hash=${hashCode()}")
+        // Enter: fade + slide down into place.
+        alpha = 0f
+        translationY = -dp(8).toFloat()
+        animate().cancel()
+        animate().alpha(1f).translationY(0f).setDuration(160L).start()
+    }
+
+    /**
+     * Exit: fade + slide up, then run [onEnd] (window removal).  A 300 ms
+     * safety post guarantees [onEnd] even if the animation is cancelled
+     * mid-way — callers must make [onEnd] idempotent (guard on
+     * isAttachedToWindow) since it may run twice.
+     */
+    fun animateOut(onEnd: () -> Unit) {
+        if (!isAttachedToWindow) { onEnd(); return }
+        animate().cancel()
+        animate().alpha(0f).translationY(-dp(8).toFloat()).setDuration(140L)
+            .withEndAction { onEnd() }.start()
+        postDelayed({ onEnd() }, 300L)
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {

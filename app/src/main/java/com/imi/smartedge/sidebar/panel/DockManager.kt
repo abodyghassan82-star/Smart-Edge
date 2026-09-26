@@ -37,7 +37,9 @@ object DockManager {
     private const val TAG = "DockManager"
     private const val FIND_RETRY_MS = 400L
     private const val FIND_MAX_TRIES = 25       // ~10 s to find the new task
-    private const val HEADER_POLL_MS = 1000L
+    private const val HEADER_POLL_MS = 750L     // idle follow rate
+    private const val POLL_FAST_MS = 250L       // burst rate right after a window move
+    private const val POLL_FAST_WINDOW_MS = 2500L // stay fast this long after a change
     private const val MISS_BEFORE_GONE = 3      // consecutive null dumps → task closed
     private const val EDGE_ZONE_DP = 32         // drag into this zone triggers dock
     private const val HEADER_HEIGHT_DP = 36
@@ -55,15 +57,19 @@ object DockManager {
         var bubble: BubbleOverlayView? = null
         var bubbleParams: WindowManager.LayoutParams? = null
         var bubbleSide = Gravity.RIGHT
-        var docked = false
         var docking = false
+        var docked = false
         var dragging = false
+        var moving = false           // moveTask in flight — don't reposition from polls
         var dragBase: Rect? = null
         var dragAccX = 0f
         var dragAccY = 0f
         var misses = 0
         var warnedNoBounds = false   // log the silent empty-bounds skip once per session
-        var lastPosLog = ""          // dedup positionHeader change-log (poll fires every 1 s)
+        var lastPosLog = ""          // dedup positionHeader change-log
+        var windowVisible = true     // task's visible= flag (bar hides while false)
+        var lastBounds: Rect? = null // last seen bounds — change detector for fast polling
+        var lastChangeAt = 0L        // uptime of last bounds change / session start
     }
 
     /** Lerp holder for the bubble snap SpringAnimation (no per-frame allocs). */
@@ -173,6 +179,7 @@ object DockManager {
 
         val session = Session(task.taskId, targetPackage, label, icon)
         if (!task.bounds.isEmpty) session.originalBounds = Rect(task.bounds)
+        session.lastChangeAt = android.os.SystemClock.uptimeMillis()
         sessions[task.taskId] = session
         flog("Launch", "session STARTED task=${task.taskId} pkg=$targetPackage bounds=${task.bounds} label=$label")
         Log.d(TAG, "session started: task=${task.taskId} pkg=$targetPackage bounds=${task.bounds}")
@@ -187,7 +194,7 @@ object DockManager {
     private fun ensurePolling() {
         mainHandler.removeCallbacks(pollRunnable)
         if (!destroyed && sessions.isNotEmpty()) {
-            mainHandler.postDelayed(pollRunnable, HEADER_POLL_MS)
+            mainHandler.postDelayed(pollRunnable, nextPollDelay())
         }
     }
 
@@ -196,23 +203,30 @@ object DockManager {
             if (destroyed || sessions.isEmpty()) return
             for (s in sessions.values.toList()) {
                 executor.execute {
-                    val bounds = try {
-                        DockTestHelper.queryTaskBounds(s.taskId)
+                    val snapshot = try {
+                        DockTestHelper.queryTaskSnapshot(s.taskId)
                     } catch (e: Exception) {
                         null
                     }
-                    mainHandler.post { handleQuery(s, bounds) }
+                    mainHandler.post { handleQuery(s, snapshot) }
                 }
             }
-            mainHandler.postDelayed(this, HEADER_POLL_MS)
+            mainHandler.postDelayed(this, nextPollDelay())
         }
     }
 
-    private fun handleQuery(session: Session, bounds: Rect?) {
+    /** Burst at 250 ms while any window moved in the last 2.5 s; else the idle rate. */
+    private fun nextPollDelay(): Long {
+        val now = android.os.SystemClock.uptimeMillis()
+        return if (sessions.values.any { now - it.lastChangeAt < POLL_FAST_WINDOW_MS }) POLL_FAST_MS
+        else HEADER_POLL_MS
+    }
+
+    private fun handleQuery(session: Session, snapshot: DockTestHelper.TaskSnapshot?) {
         if (destroyed) return
         if (sessions[session.taskId] !== session) return
 
-        if (bounds == null) {
+        if (snapshot == null) {
             session.misses++
             if (session.misses >= MISS_BEFORE_GONE) {
                 removeSession(session, "task no longer exists")
@@ -220,11 +234,29 @@ object DockManager {
             return
         }
         session.misses = 0
-        if (bounds.isEmpty) return
         if (session.docked) return          // while docked, saved bounds must stay untouched
 
+        // Window visibility: hide our bar while the window sits behind other
+        // apps; the normal path below re-shows it the moment it comes back.
+        if (session.windowVisible != snapshot.visible) {
+            session.windowVisible = snapshot.visible
+            flog("Header", "window ${if (snapshot.visible) "VISIBLE → header back" else "INVISIBLE → header hidden"} task=${session.taskId}")
+        }
+        if (!snapshot.visible) {
+            if (session.header != null) hideHeader(session)
+            return
+        }
+
+        val bounds = snapshot.bounds
+        if (bounds.isEmpty) return
+        // Mid-drag or moveTask in flight: don't fight the header/resize.
+        if (session.dragging || session.moving) return
+
+        if (session.lastBounds != bounds) {
+            session.lastBounds = Rect(bounds)
+            session.lastChangeAt = android.os.SystemClock.uptimeMillis()
+        }
         session.originalBounds = Rect(bounds)
-        if (session.dragging) return        // user is mid-drag; don't fight the header
         if (session.header == null) showHeader(session) else positionHeader(session, bounds)
     }
 
@@ -300,13 +332,19 @@ object DockManager {
         val view = session.header ?: return
         session.header = null
         session.headerParams = null
-        val wm = windowManager ?: return
-        try {
-            if (view.isAttachedToWindow) wm.removeViewImmediate(view) else wm.removeView(view)
-            flog("Header", "header HIDDEN task=${session.taskId}")
-        } catch (e: Exception) {
-            flog("Header", "hideHeader FAILED task=${session.taskId}: ${e.message}")
-            Log.w(TAG, "hideHeader failed task=${session.taskId}: ${e.message}")
+        // Fade/slide the bar out, then remove the window (animateOut guarantees
+        // the end-action runs; the isAttachedToWindow guard keeps it idempotent).
+        view.animateOut {
+            try {
+                val wm = windowManager
+                if (wm != null && view.isAttachedToWindow) {
+                    wm.removeViewImmediate(view)
+                    flog("Header", "header HIDDEN task=${session.taskId}")
+                }
+            } catch (e: Exception) {
+                flog("Header", "hideHeader FAILED task=${session.taskId}: ${e.message}")
+                Log.w(TAG, "hideHeader failed task=${session.taskId}: ${e.message}")
+            }
         }
     }
 
@@ -358,12 +396,15 @@ object DockManager {
             val target = Rect(tx, ty, tx + base.width(), ty + base.height())
             flog("Header", "drag target=$target edge=${overlapsEdge(target)} → moveTask")
 
+            session.moving = true      // hold poll repositioning until moveTask lands
             executor.execute {
                 val log = StringBuilder()
                 val summary = DockTestHelper.moveTask(session.taskId, Rect(target), log)
                 dumpLog(log)
+                flogBlock("Header", log)
                 flog("Header", "moveTask returned: $summary")
                 mainHandler.post {
+                    session.moving = false
                     if (destroyed || sessions[session.taskId] !== session) {
                         flog("Header", "moveTask RESULT dropped (destroyed/session gone)")
                         return@post
@@ -407,6 +448,7 @@ object DockManager {
             flog("Dock", "dock EXEC shrink() begin task=${session.taskId}")
             val summary = DockTestHelper.shrink(c, log, session.pkg)
             dumpLog(log)
+            flogBlock("Dock", log)
             flog("Dock", "dock EXEC shrink() returned: $summary")
             mainHandler.post {
                 session.docking = false
@@ -446,6 +488,7 @@ object DockManager {
                 c, session.taskId, Rect(session.originalBounds), log
             )
             dumpLog(log)
+            flogBlock("Restore", log)
             flog("Restore", "restore EXEC restoreTo returned: $summary")
             mainHandler.post {
                 if (destroyed || sessions[session.taskId] !== session) {
@@ -475,6 +518,7 @@ object DockManager {
             val log = StringBuilder()
             val summary = DockTestHelper.expandTask(c, session.taskId, log)
             dumpLog(log)
+            flogBlock("Expand", log)
             flog("Expand", "expand EXEC returned: $summary")
             mainHandler.post {
                 if (destroyed || sessions[session.taskId] !== session) return@post
@@ -506,6 +550,7 @@ object DockManager {
             flog("Close", "close EXEC closeTask begin task=${session.taskId}")
             val summary = DockTestHelper.closeTask(session.taskId, log)
             dumpLog(log)
+            flogBlock("Close", log)
             flog("Close", "close EXEC closeTask returned: $summary")
             mainHandler.post {
                 if (destroyed || sessions[session.taskId] !== session) {
@@ -588,13 +633,18 @@ object DockManager {
         val view = session.bubble ?: return
         session.bubble = null
         session.bubbleParams = null
-        val wm = windowManager ?: return
-        try {
-            if (view.isAttachedToWindow) wm.removeViewImmediate(view) else wm.removeView(view)
-            flog("Bubble", "bubble HIDDEN task=${session.taskId}")
-        } catch (e: Exception) {
-            flog("Bubble", "hideBubble FAILED task=${session.taskId}: ${e.message}")
-            Log.w(TAG, "hideBubble failed task=${session.taskId}: ${e.message}")
+        // Fade/shrink the bubble out, then remove the window (idempotent end-action).
+        view.animateOut {
+            try {
+                val wm = windowManager
+                if (wm != null && view.isAttachedToWindow) {
+                    wm.removeViewImmediate(view)
+                    flog("Bubble", "bubble HIDDEN task=${session.taskId}")
+                }
+            } catch (e: Exception) {
+                flog("Bubble", "hideBubble FAILED task=${session.taskId}: ${e.message}")
+                Log.w(TAG, "hideBubble failed task=${session.taskId}: ${e.message}")
+            }
         }
     }
 
@@ -788,6 +838,21 @@ object DockManager {
     private fun dumpLog(log: StringBuilder) {
         val text = log.toString()
         if (text.isNotEmpty()) Log.d(TAG, text.take(3000))
+    }
+
+    /**
+     * Pipe a helper's multi-line detail log (resize attempts, verify reads,
+     * command outputs) into docklog.txt line by line, so on-device diagnosis
+     * never needs logcat again.  Never throws.
+     */
+    private fun flogBlock(tag: String, log: StringBuilder) {
+        try {
+            for (line in log.toString().lineSequence()) {
+                if (line.isNotBlank()) flog(tag, line.take(500))
+            }
+        } catch (e: Exception) {
+            flog(tag, "flogBlock FAILED: ${e.message}")
+        }
     }
 
     /** Airtight step log: file + shared buffer + on-screen Dock Test log view. */

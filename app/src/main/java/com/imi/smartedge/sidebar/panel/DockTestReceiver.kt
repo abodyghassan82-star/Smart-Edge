@@ -20,14 +20,21 @@ class DockTestReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context, intent: Intent?) {
-        if (intent == null) return
-        val log = StringBuilder()
-        val summary = when (intent.action) {
-            ACTION_SHRINK  -> DockTestHelper.shrink(context, log)
-            ACTION_RESTORE -> DockTestHelper.restore(context, log)
-            else -> return
-        }
-        Log.d("DockTest", log.toString())
-        Toast.makeText(context, summary, Toast.LENGTH_LONG).show()
+        val action = intent?.action ?: return
+        if (action != ACTION_SHRINK && action != ACTION_RESTORE) return
+        val app = context.applicationContext
+        // Background: shrink/restore verify the resize (sleeps + dumpsys) —
+        // never run that on the main thread of a BroadcastReceiver.
+        Thread {
+            val log = StringBuilder()
+            val summary = when (action) {
+                ACTION_SHRINK  -> DockTestHelper.shrink(app, log)
+                else           -> DockTestHelper.restore(app, log)
+            }
+            Log.d("DockTest", log.toString())
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                Toast.makeText(app, summary, Toast.LENGTH_LONG).show()
+            }
+        }.start()
     }
 }
