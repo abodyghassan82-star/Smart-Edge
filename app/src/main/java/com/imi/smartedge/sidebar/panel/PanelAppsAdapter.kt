@@ -273,6 +273,11 @@ class PanelAppsAdapter(
                     
                     if (shouldFreeform && context.isFreeformEnabled() && app.type != AppInfo.Type.SHORTCUT) {
                         launchFreeform(launchIntent)
+                        // Phase B: track the new freeform task and show the dock header
+                        val launchPkg = launchIntent.component?.packageName
+                            ?: launchIntent.`package`
+                            ?: app.packageName
+                        DockManager.onFreeformLaunched(context, launchPkg)
                     } else {
                         try {
                             if (isAccessibilityShortcut) {

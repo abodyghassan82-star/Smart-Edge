@@ -375,6 +375,185 @@ object DockTestHelper {
         return summary
     }
 
+    // ── dock-to-bubble engine API (Phase B) ────────────────────────────────
+
+    /** A freeform task selected for docking. */
+    data class DockTask(val taskId: Int, val bounds: Rect, val pkg: String?)
+
+    /** Result of a dock (shrink-to-bubble) operation. */
+    data class DockResult(
+        val taskId: Int,
+        val originalBounds: Rect,
+        val bubbleBounds: Rect,
+        val summary: String,
+        val success: Boolean
+    )
+
+    /**
+     * Quiet, strict lookup: the HIGHEST freeform task whose dump block
+     * mentions [targetPackage] (no fallback to unrelated packages, no log
+     * output, no Shizuku permission prompt).  Off-screen orphans are skipped.
+     * Returns null when no matching freeform task exists or the dump fails.
+     * Runs shell commands — call from a background thread.
+     */
+    fun findTaskByPackage(context: Context, targetPackage: String): DockTask? {
+        val quiet = StringBuilder()
+        val output = runShizukuCommand("dumpsys activity activities", quiet) ?: return null
+        val dm = context.resources.displayMetrics
+        val match = parseTaskBlocks(output.lines())
+            .filter { it.isFreeform && it.taskId != null && matchesPackage(it, targetPackage) }
+            .filter { b ->
+                val bounds = b.bounds
+                bounds == null || !isMostlyOffScreen(bounds, dm.widthPixels, dm.heightPixels)
+            }
+            .maxByOrNull { it.taskId ?: -1 } ?: return null
+        val id = match.taskId ?: return null
+        return DockTask(id, match.bounds ?: Rect(), match.pkg)
+    }
+
+    /**
+     * Shrink a KNOWN task ([taskId]) to the bubble target and save
+     * [originalBounds] as the restorable state.  Used by the dock overlay
+     * flow.  Full log is appended to [log].  Runs shell commands — call from
+     * a background thread.
+     */
+    fun dockTask(context: Context, taskId: Int, originalBounds: Rect, log: StringBuilder): DockResult {
+        log.appendLine("=== DOCK TO BUBBLE: taskId=$taskId ===")
+        if (!checkShizuku(log)) {
+            return DockResult(taskId, Rect(originalBounds), Rect(), "Shizuku not ready", false)
+        }
+        saveState(context, taskId, originalBounds)
+        val bubble = computeBubbleBounds(context)
+        log.appendLine("originalBounds=$originalBounds  bubbleBounds=$bubble")
+        val result = tryResizeMethods(taskId, bubble, log)
+        val summary = if (result.first) {
+            val onTop = keepTaskOnTop(taskId, log)
+            "Dock: task $taskId shrunk to bubble | $onTop"
+        } else {
+            "Dock FAILED – ${result.second}"
+        }
+        log.appendLine(summary)
+        Log.d(TAG, summary)
+        return DockResult(taskId, Rect(originalBounds), Rect(bubble), summary, result.first)
+    }
+
+    /**
+     * Restore a task to [bounds] and raise it.  Clears the saved dock state
+     * when it points at the same task.  Returns a one-line summary; a
+     * summary containing "FAILED" means the resize did not go through.
+     * Runs shell commands — call from a background thread.
+     */
+    fun restoreTo(context: Context, taskId: Int, bounds: Rect, log: StringBuilder): String {
+        log.appendLine("=== RESTORE TO BOUNDS: taskId=$taskId → $bounds ===")
+        if (!checkShizuku(log)) return "Shizuku not ready"
+        val summary = resizeAndFocus(taskId, bounds, log, "restore")
+        if (!summary.contains("FAILED")) {
+            val state = loadState(context)
+            if (state != null && state.taskId == taskId) clearState(context)
+        }
+        return summary
+    }
+
+    /**
+     * Resize a task to fullscreen and raise it.  Returns a one-line summary.
+     * Runs shell commands — call from a background thread.
+     */
+    fun expandTask(context: Context, taskId: Int, log: StringBuilder): String {
+        log.appendLine("=== EXPAND TASK: taskId=$taskId ===")
+        if (!checkShizuku(log)) return "Shizuku not ready"
+        val dm = context.resources.displayMetrics
+        val bounds = Rect(0, 0, dm.widthPixels, dm.heightPixels)
+        return resizeAndFocus(taskId, bounds, log, "expand")
+    }
+
+    /**
+     * Move/resize a task to [bounds] without raising it (used by the header
+     * drag).  Returns a one-line summary.  Runs shell commands — call from a
+     * background thread.
+     */
+    fun moveTask(taskId: Int, bounds: Rect, log: StringBuilder): String {
+        log.appendLine("=== MOVE TASK: taskId=$taskId → $bounds ===")
+        if (!checkShizuku(log)) return "Shizuku not ready"
+        return resizeAndFocus(taskId, bounds, log, "move", focus = false)
+    }
+
+    /**
+     * Close (remove) a task via `am task remove` / `cmd activity remove-task`.
+     * Returns a one-line summary; "FAILED" means neither command worked.
+     * Runs shell commands — call from a background thread.
+     */
+    fun closeTask(taskId: Int, log: StringBuilder): String {
+        log.appendLine("=== CLOSE TASK: taskId=$taskId ===")
+        if (!checkShizuku(log)) return "Shizuku not ready"
+        for (cmd in listOf("am task remove $taskId", "cmd activity remove-task $taskId")) {
+            log.appendLine("Trying: $cmd")
+            val out = runShizukuCommand(cmd, log)
+            log.appendLine("  output: ${out?.trim()?.take(300) ?: "null"}")
+            if (out != null && !looksLikeError(out)) {
+                val summary = "Closed task $taskId via $cmd"
+                log.appendLine(summary)
+                Log.d(TAG, summary)
+                return summary
+            }
+        }
+        val summary = "FAILED to close task $taskId (both remove commands failed)"
+        log.appendLine(summary)
+        Log.e(TAG, summary)
+        return summary
+    }
+
+    /**
+     * Quiet bounds probe for the header/bubble follow loop.  Returns the
+     * task's current bounds, an EMPTY Rect when the task exists but its
+     * bounds could not be parsed, or null when the task is gone / the dump
+     * failed (caller should require several consecutive nulls before
+     * treating the task as closed).  Runs shell commands — call from a
+     * background thread.
+     */
+    fun queryTaskBounds(taskId: Int): Rect? {
+        val quiet = StringBuilder()
+        val output = runShizukuCommand("dumpsys activity activities", quiet) ?: return null
+        val block = parseTaskBlocks(output.lines()).firstOrNull { it.taskId == taskId } ?: return null
+        return block.bounds ?: Rect()
+    }
+
+    /** The bubble shrink target: 160×160 dp near the right edge (matches shrink()). */
+    fun computeBubbleBounds(context: Context): Rect {
+        val dm = context.resources.displayMetrics
+        val density = dm.density
+        val sizePx = (160 * density).toInt()
+        val marginPx = (8 * density).toInt()
+        return Rect(
+            dm.widthPixels - sizePx - marginPx,
+            (dm.heightPixels / 2) - (sizePx / 2),
+            dm.widthPixels - marginPx,
+            (dm.heightPixels / 2) + (sizePx / 2)
+        )
+    }
+
+    private fun resizeAndFocus(
+        taskId: Int,
+        bounds: Rect,
+        log: StringBuilder,
+        label: String,
+        focus: Boolean = true
+    ): String {
+        val result = tryResizeMethods(taskId, bounds, log)
+        val summary = if (result.first) {
+            if (focus) {
+                val onTop = keepTaskOnTop(taskId, log)
+                "$label: task $taskId → $bounds | $onTop"
+            } else {
+                "$label: task $taskId → $bounds | ${result.second}"
+            }
+        } else {
+            "$label FAILED – ${result.second}"
+        }
+        log.appendLine(summary)
+        Log.d(TAG, summary)
+        return summary
+    }
+
     // ── internals ──────────────────────────────────────────────────────────
 
     // Case-insensitive patterns for freeform detection

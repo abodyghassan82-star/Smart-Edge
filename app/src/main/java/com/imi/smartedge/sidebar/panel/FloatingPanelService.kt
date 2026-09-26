@@ -137,6 +137,7 @@ class FloatingPanelService : Service() {
         }
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         panelPrefs = PanelPreferences(this)
+        DockManager.attach(this)
         
         try {
             cameraManager = getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
@@ -438,6 +439,9 @@ class FloatingPanelService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
+        try {
+            DockManager.destroy()
+        } catch (e: Exception) {}
         try {
             val dockNm = getSystemService(NotificationManager::class.java)
             dockNm.cancel(DOCK_TEST_NOTIFICATION_ID)
