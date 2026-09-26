@@ -140,6 +140,30 @@ class BubbleOverlayView(context: Context) : View(context) {
 
     private fun dp(v: Int): Int = (v * density).toInt()
 
+    /** Raw input proof — same as HeaderOverlayView: every event before hit-testing. */
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        val action = when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> "DOWN"
+            MotionEvent.ACTION_MOVE -> "MOVE"
+            MotionEvent.ACTION_UP -> "UP"
+            MotionEvent.ACTION_CANCEL -> "CANCEL"
+            else -> "OTHER(${event.actionMasked})"
+        }
+        DockTestHelper.fileLog(
+            context, "BubbleRaw",
+            "raw $action local=(${event.x},${event.y}) screen=(${event.rawX},${event.rawY}) " +
+                "view=$left,$top,$right,$bottom ${width}x$height " +
+                "attached=$isAttachedToWindow vis=$visibility edge=$edgeSide hash=${hashCode()}"
+        )
+        return super.dispatchTouchEvent(event)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        DockTestHelper.fileLog(context, "BubbleTouch",
+            "onAttachedToWindow — bubble connected hash=${hashCode()}")
+    }
+
     private fun bubbleRect(): RectF {
         val x0 = bubbleX0().toFloat()
         return RectF(x0, 0f, x0 + bubbleW, bubbleH.toFloat())

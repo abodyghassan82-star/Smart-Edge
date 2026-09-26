@@ -105,6 +105,38 @@ class HeaderOverlayView(context: Context) : View(context) {
 
     private fun dp(v: Int): Int = (v * density).toInt()
 
+    // ── raw input proof: EVERY event this window delivers, before any ────
+    // ── hit-testing, so an empty docklog.txt can never be ambiguous.     ──
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        val action = when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> "DOWN"
+            MotionEvent.ACTION_MOVE -> "MOVE"
+            MotionEvent.ACTION_UP -> "UP"
+            MotionEvent.ACTION_CANCEL -> "CANCEL"
+            else -> "OTHER(${event.actionMasked})"
+        }
+        DockTestHelper.fileLog(
+            context, "HeaderRaw",
+            "raw $action local=(${event.x},${event.y}) screen=(${event.rawX},${event.rawY}) " +
+                "view=$left,$top,$right,$bottom ${width}x$height " +
+                "attached=$isAttachedToWindow vis=$visibility hash=${hashCode()}"
+        )
+        return super.dispatchTouchEvent(event)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        DockTestHelper.fileLog(context, "HeaderTouch",
+            "onAttachedToWindow — view connected to the window hash=${hashCode()}")
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        DockTestHelper.fileLog(context, "HeaderTouch",
+            "onSizeChanged ${oldw}x$oldh → ${w}x$h${if (w <= 0 || h <= 0) " ZERO SIZE — no touch area!" else ""}")
+    }
+
     // ── layout (recomputed on demand; cheap) ──────────────────────────────
 
     private fun expandRect(): RectF =

@@ -62,6 +62,8 @@ object DockManager {
         var dragAccX = 0f
         var dragAccY = 0f
         var misses = 0
+        var warnedNoBounds = false   // log the silent empty-bounds skip once per session
+        var lastPosLog = ""          // dedup positionHeader change-log (poll fires every 1 s)
     }
 
     /** Lerp holder for the bubble snap SpringAnimation (no per-frame allocs). */
@@ -87,9 +89,11 @@ object DockManager {
 
     /** Called from [FloatingPanelService.onCreate]. */
     fun attach(context: Context) {
-        appContext = context.applicationContext
+        val app = context.applicationContext
+        appContext = app
         windowManager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
         destroyed = false
+        flog("Session", "attach ok perm=${Settings.canDrawOverlays(app)} docklog=${java.io.File(app.filesDir, "docklog.txt").absolutePath}")
         Log.d(TAG, "attached")
     }
 
@@ -121,6 +125,7 @@ object DockManager {
     fun onFreeformLaunched(context: Context, targetPackage: String) {
         if (appContext == null) attach(context)
         val c = appContext ?: return
+        flog("Launch", "onFreeformLaunched pkg=$targetPackage perm=${Settings.canDrawOverlays(c)}")
         if (!Settings.canDrawOverlays(c)) {
             Log.w(TAG, "overlay permission missing — header overlay skipped")
             return
@@ -173,6 +178,7 @@ object DockManager {
         Log.d(TAG, "session started: task=${task.taskId} pkg=$targetPackage bounds=${task.bounds}")
 
         if (!session.originalBounds.isEmpty) showHeader(session)
+        else flog("Launch", "header deferred: bounds unknown at session start task=${task.taskId}")
         ensurePolling()
     }
 
@@ -233,13 +239,20 @@ object DockManager {
             Log.e(TAG, "showHeader SKIPPED: overlay permission missing task=${session.taskId}")
             return
         }
-        if (session.originalBounds.isEmpty) return   // poll will retry once bounds are known
+        if (session.originalBounds.isEmpty) {          // poll will retry once bounds are known
+            if (!session.warnedNoBounds) {
+                session.warnedNoBounds = true
+                flog("Header", "showHeader SKIPPED once: bounds not known yet task=${session.taskId}")
+            }
+            return
+        }
 
         val view = HeaderOverlayView(c).apply {
             setHeaderInfo(session.icon, session.label)
             listener = headerListener(session)
         }
         val lp = newOverlayParams(c, c.dpToPx(HEADER_HEIGHT_DP), c.dpToPx(MIN_HEADER_W_DP))
+        flog("Header", "addView begin task=${session.taskId} view hash=${view.hashCode()} w=${lp.width} h=${lp.height} listener wired")
         try {
             wm.addView(view, lp)
         } catch (e: Exception) {
@@ -271,7 +284,16 @@ object DockManager {
         } else {
             (bounds.top + c.dpToPx(6)).coerceAtMost((dm.heightPixels - headerH).coerceAtLeast(0))
         }
-        try { wm.updateViewLayout(view, lp) } catch (e: Exception) {}
+        val pos = "x=${lp.x} y=${lp.y} w=${lp.width} h=${lp.height} window=$bounds"
+        if (pos != session.lastPosLog) {
+            session.lastPosLog = pos
+            flog("Header", "positionHeader $pos")
+            Log.d(TAG, "positionHeader $pos")
+        }
+        try { wm.updateViewLayout(view, lp) } catch (e: Exception) {
+            flog("Header", "updateViewLayout FAILED task=${session.taskId}: ${e.message}")
+            Log.w(TAG, "updateViewLayout failed task=${session.taskId}: ${e.message}")
+        }
     }
 
     private fun hideHeader(session: Session) {
@@ -723,6 +745,16 @@ object DockManager {
 
     // ── shared helpers ────────────────────────────────────────────────────
 
+    /**
+     * Overlay window params for header/bubble.
+     *
+     * Touch contract (do not change without re-testing taps):
+     * FLAG_NOT_TOUCHABLE must NOT be set or no input ever reaches the view;
+     * FLAG_NOT_FOCUSABLE keeps the window from stealing keyboard focus;
+     * FLAG_NOT_TOUCH_MODAL lets taps outside these bounds fall through to
+     * windows below.  This is the exact flag set the working edge/notch
+     * handles in FloatingPanelService use.
+     */
     private fun newOverlayParams(
         context: Context,
         height: Int,
