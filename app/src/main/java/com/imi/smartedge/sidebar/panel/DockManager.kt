@@ -345,33 +345,30 @@ object DockManager {
         session.docking = true
         val c = appContext ?: run { session.docking = false; return }
 
+        Log.d(TAG, "dock START: task=${session.taskId} pkg=${session.pkg} label=${session.label}")
+        toast("Docking ${session.label}…")
+
         executor.execute {
+            // Exact proven Dock Test path: shrink() = find task by package /
+            // highest taskId → cmd activity task resize → am task focus.
             val log = StringBuilder()
-            if (!DockTestHelper.checkShizuku(log)) {
-                dumpLog(log)
-                mainHandler.post {
-                    session.docking = false
-                    if (!destroyed) toast("Shizuku not ready")
-                }
-                return@execute
-            }
-            val fresh = try { DockTestHelper.queryTaskBounds(session.taskId) } catch (e: Exception) { null }
-            val original = if (fresh != null && !fresh.isEmpty) Rect(fresh)
-                           else Rect(session.originalBounds)
-            val result = DockTestHelper.dockTask(c, session.taskId, original, log)
+            val summary = DockTestHelper.shrink(c, log, session.pkg)
             dumpLog(log)
             mainHandler.post {
                 session.docking = false
                 if (destroyed || sessions[session.taskId] !== session) return@post
-                if (result.success) {
-                    session.originalBounds = Rect(result.originalBounds)
-                    session.docked = true
-                    hideHeader(session)
-                    showBubble(session, result.bubbleBounds)
-                    haptic()
-                    Log.d(TAG, "docked task=${session.taskId}")
+                if (isFailure(summary)) {
+                    Log.e(TAG, "dock FAILED: task=${session.taskId} reason=$summary")
+                    toast("Dock failed: $summary")
                 } else {
-                    toast(result.summary)
+                    session.docked = true
+                    val bubble = DockTestHelper.computeBubbleBounds(c)
+                    Log.d(TAG, "dock OK: task=${session.taskId} summary=$summary bubble=$bubble")
+                    hideHeader(session)
+                    if (showBubble(session, bubble)) {
+                        toast("Docked: ${session.label} → bubble")
+                        haptic()
+                    }
                 }
             }
         }
@@ -379,6 +376,8 @@ object DockManager {
 
     private fun onTapBubble(session: Session) {
         val c = appContext ?: return
+        Log.d(TAG, "restore START: task=${session.taskId} bounds=${session.originalBounds}")
+        toast("Restoring ${session.label}…")
         executor.execute {
             val log = StringBuilder()
             val summary = DockTestHelper.restoreTo(
@@ -388,13 +387,15 @@ object DockManager {
             mainHandler.post {
                 if (destroyed || sessions[session.taskId] !== session) return@post
                 if (isFailure(summary)) {
-                    toast(summary)
+                    Log.e(TAG, "restore FAILED: task=${session.taskId} reason=$summary")
+                    toast("Restore failed: $summary")
                     return@post
                 }
                 session.docked = false
                 hideBubble(session)
                 showHeader(session)
-                Log.d(TAG, "restored task=${session.taskId}")
+                Log.d(TAG, "restore OK: task=${session.taskId} summary=$summary")
+                toast("Restored: ${session.label}")
             }
         }
     }
@@ -425,6 +426,8 @@ object DockManager {
     }
 
     private fun closeSession(session: Session) {
+        Log.d(TAG, "close START: task=${session.taskId} pkg=${session.pkg}")
+        toast("Closing ${session.label}…")
         executor.execute {
             val log = StringBuilder()
             val summary = DockTestHelper.closeTask(session.taskId, log)
@@ -432,8 +435,11 @@ object DockManager {
             mainHandler.post {
                 if (destroyed || sessions[session.taskId] !== session) return@post
                 if (isFailure(summary)) {
-                    toast(summary)
+                    Log.e(TAG, "close FAILED: task=${session.taskId} reason=$summary")
+                    toast("Close failed: $summary")
                 } else {
+                    Log.d(TAG, "close OK: task=${session.taskId} summary=$summary")
+                    toast("Closed: ${session.label}")
                     removeSession(session, "closed by user")
                 }
             }
@@ -450,13 +456,15 @@ object DockManager {
 
     // ── bubble overlay ────────────────────────────────────────────────────
 
-    private fun showBubble(session: Session, bubbleBounds: Rect) {
-        val c = appContext ?: return
-        val wm = windowManager ?: return
-        if (session.bubble != null) return
+    /** Shows the bubble overlay. Returns true when it is actually visible. */
+    private fun showBubble(session: Session, bubbleBounds: Rect): Boolean {
+        val c = appContext ?: return false
+        val wm = windowManager ?: return false
+        if (session.bubble != null) return true
         if (!Settings.canDrawOverlays(c)) {
-            Log.w(TAG, "overlay permission missing — bubble not shown")
-            return
+            Log.e(TAG, "bubble NOT shown: overlay permission missing (task=${session.taskId})")
+            toast("Bubble failed: overlay permission missing")
+            return false
         }
 
         val view = BubbleOverlayView(c).apply {
@@ -477,13 +485,15 @@ object DockManager {
         try {
             wm.addView(view, lp)
         } catch (e: Exception) {
-            Log.e(TAG, "addView bubble failed: ${e.message}")
-            return
+            Log.e(TAG, "bubble addView FAILED: task=${session.taskId} ${e.message}", e)
+            toast("Bubble failed: ${e.message}")
+            return false
         }
         session.bubble = view
         session.bubbleParams = lp
         session.bubbleSide = Gravity.RIGHT
-        Log.d(TAG, "bubble shown for task=${session.taskId} at $lp")
+        Log.d(TAG, "bubble shown for task=${session.taskId} x=${lp.x} y=${lp.y} ${winW}x$winH")
+        return true
     }
 
     private fun hideBubble(session: Session) {
