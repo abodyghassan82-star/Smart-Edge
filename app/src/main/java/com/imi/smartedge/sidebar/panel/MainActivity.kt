@@ -431,7 +431,8 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
                         binding.btnDockShrink.isEnabled = true
                         binding.btnDockShrink.text = "Shrink (8s)"
                         val log = StringBuilder()
-                        val summary = DockTestHelper.shrink(this@MainActivity, log)
+                        val targetPkg = binding.etDockSearchTerm.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                        val summary = DockTestHelper.shrink(this@MainActivity, log, targetPkg)
                         appendDockLog(log.toString())
                         binding.root.showModernToast(summary)
                     }

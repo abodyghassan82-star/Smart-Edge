@@ -60,16 +60,18 @@ object DockTestHelper {
 
     /**
      * Shrink the top freeform task to a 160×160 dp bubble near the right edge.
-     * Full log is appended to [log]. Returns a one-line summary for Toasts.
+     * [targetPackage] optionally restricts selection to tasks of that package
+     * (e.g. "youtube"); falls back to any on-screen freeform task when nothing
+     * matches. Full log is appended to [log]. Returns a one-line summary for Toasts.
      */
-    fun shrink(context: Context, log: StringBuilder): String {
+    fun shrink(context: Context, log: StringBuilder, targetPackage: String? = null): String {
         log.appendLine("=== DOCK TEST: SHRINK ===")
 
         if (!checkShizuku(log)) {
             return "Shizuku not ready"
         }
 
-        val task = findTopFreeformTask(context, log)
+        val task = findTopFreeformTask(context, log, targetPackage)
         if (task == null) {
             val msg = "No freeform task found – open an app in freeform first"
             log.appendLine(msg)
@@ -93,7 +95,12 @@ object DockTestHelper {
         log.appendLine("Target bounds: $target  (${sizePx}×${sizePx} px)")
 
         val result = tryResizeMethods(task.taskId, target, log)
-        val summary = if (result.first) "Dock shrink: ${result.second}" else "Dock shrink FAILED – ${result.second}"
+        val summary = if (result.first) {
+            val onTop = keepTaskOnTop(task.taskId, log)
+            "Dock shrink: ${result.second} | $onTop"
+        } else {
+            "Dock shrink FAILED – ${result.second}"
+        }
         log.appendLine(summary)
         Log.d(TAG, summary)
         return summary
@@ -122,7 +129,8 @@ object DockTestHelper {
         val result = tryResizeMethods(state.taskId, state.bounds, log)
         val summary = if (result.first) {
             clearState(context)
-            "Dock restore: ${result.second}"
+            val onTop = keepTaskOnTop(state.taskId, log)
+            "Dock restore: ${result.second} | $onTop"
         } else {
             "Dock restore FAILED – ${result.second}"
         }
@@ -526,7 +534,7 @@ object DockTestHelper {
         return candidates.last()
     }
 
-    private fun findTopFreeformTask(context: Context, log: StringBuilder): TaskInfo? {
+    private fun findTopFreeformTask(context: Context, log: StringBuilder, targetPackage: String? = null): TaskInfo? {
         val output = runShizukuCommand("dumpsys activity activities", log) ?: return null
         log.appendLine("dumpsys output length: ${output.length}")
 
@@ -556,8 +564,6 @@ object DockTestHelper {
             log.appendLine("Display size: ${screenW}x$screenH (init=WxH not in dump, using displayMetrics)")
         }
 
-        val zOrder = parseZOrderTaskIds(lines, log)
-
         val freeformBlocks = blocks.filter { it.isFreeform && it.taskId != null }
         if (freeformBlocks.isEmpty()) {
             log.appendLine("No freeform task found among ${blocks.size} Task{ blocks")
@@ -575,9 +581,7 @@ object DockTestHelper {
                 log.appendLine("skipped (off-screen orphan): taskId=${b.taskId} bounds=$bounds pkg=${b.pkg ?: "?"}")
                 continue
             }
-            val zi = b.taskId?.let { zOrder.indexOf(it) } ?: -1
-            val zText = if (zi >= 0) "zOrder=#$zi" else "zOrder=not-listed"
-            log.appendLine("candidate: taskId=${b.taskId} bounds=${bounds ?: "?"} pkg=${b.pkg ?: "?"} $zText")
+            log.appendLine("candidate: taskId=${b.taskId} bounds=${bounds ?: "?"} pkg=${b.pkg ?: "?"}")
             onScreen.add(b)
         }
 
@@ -586,16 +590,31 @@ object DockTestHelper {
             return null
         }
 
-        val best = pickTopmost(onScreen, zOrder) ?: return null
-        val bestZ = best.taskId?.let { zOrder.indexOf(it) } ?: -1
-        if (bestZ >= 0) {
-            log.appendLine("Selected taskId=${best.taskId} – first in 'Application tokens in top down Z order' (#$bestZ of ${zOrder.size})")
+        // Prefer tasks of the target package; fall back to all candidates.
+        val scoped = if (targetPackage != null) {
+            val matching = onScreen.filter { matchesPackage(it, targetPackage) }
+            if (matching.isNotEmpty()) {
+                log.appendLine("Package filter \"$targetPackage\": ${matching.size} of ${onScreen.size} candidate(s) match")
+                matching
+            } else {
+                log.appendLine("No on-screen freeform task matches \"$targetPackage\" – using all ${onScreen.size} candidate(s)")
+                onScreen
+            }
         } else {
-            log.appendLine("Selected taskId=${best.taskId} – not in Z-order; legacy fallback (last freeform Task{ block)")
+            onScreen
         }
+
+        // Highest taskId = most recently created task.  (Z-order text parsing
+        // was tried first and finds nothing on this ROM, so it was dropped.)
+        val best = scoped.maxByOrNull { it.taskId ?: -1 } ?: return null
+        log.appendLine("Selected taskId=${best.taskId} – highest taskId among ${scoped.size} candidate(s) (most recently created)")
         log.appendLine("  ${best.matchDetail}")
         return TaskInfo(best.taskId ?: 0, best.bounds ?: Rect())
     }
+
+    private fun matchesPackage(b: TaskBlock, targetPackage: String): Boolean =
+        b.pkg?.contains(targetPackage, ignoreCase = true) == true ||
+            b.blockText.contains(targetPackage, ignoreCase = true)
 
     /**
      * Last-resort flat scan when no Task{ lines exist.
@@ -729,6 +748,62 @@ object DockTestHelper {
             Log.e(TAG, msg, e)
             msg
         }
+    }
+
+    /**
+     * After a successful resize, try to raise the task so it doesn't fall
+     * behind other apps when the user taps elsewhere.
+     *
+     * Tries `am task focus <taskId>` first, then `cmd activity task focus
+     * <taskId>` (AOSP ActivityManagerShellCommand#runTaskFocus →
+     * setFocusedTask), logging the output of each.  When neither exists, the
+     * `cmd activity` usage is probed for focus/top/front/always commands and
+     * it is logged that a persistent always-on-top needs the spec's
+     * header/bubble overlay layer instead.
+     *
+     * Returns a short status line for the summary.
+     */
+    private fun keepTaskOnTop(taskId: Int, log: StringBuilder): String {
+        log.appendLine("── Keep on top: taskId=$taskId ──")
+
+        val commands = listOf(
+            "am task focus $taskId",
+            "cmd activity task focus $taskId"
+        )
+        for (cmd in commands) {
+            log.appendLine("Trying: $cmd")
+            val out = runShizukuCommand(cmd, log)
+            log.appendLine("  output: ${out?.trim()?.take(300) ?: "null"}")
+            if (out != null && !looksLikeError(out)) {
+                log.appendLine("  → WORKED: $cmd")
+                return "on-top: $cmd OK"
+            }
+            log.appendLine("  → not supported on this ROM: $cmd")
+        }
+
+        // Nothing worked — probe what this ROM's `cmd activity` reports as
+        // supported, so the log shows what actually exists here.
+        log.appendLine("Probing supported commands: cmd activity (usage)")
+        val usage = runShizukuCommand("cmd activity", log)
+        if (usage != null) {
+            val interesting = usage.lines().filter { l ->
+                val s = l.lowercase().trim()
+                s.isNotBlank() &&
+                    ("focus" in s || "top" in s || "front" in s || "always" in s)
+            }
+            if (interesting.isEmpty()) {
+                log.appendLine("  (usage lists no focus/top/front/always commands)")
+            } else {
+                for (l in interesting.take(10)) {
+                    log.appendLine("  usage: ${l.trim()}")
+                }
+            }
+        }
+
+        val msg = "on-top: no always-on-top command on this ROM – needs the spec header/bubble overlay layer instead"
+        log.appendLine(msg)
+        Log.d(TAG, msg)
+        return msg
     }
 
     private fun resizeViaHiddenApi(taskId: Int, bounds: Rect): Boolean {
