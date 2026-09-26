@@ -106,6 +106,7 @@ object DockManager {
             hideBubble(s)
         }
         sessions.clear()
+        flog("Session", "DockManager destroyed — all overlays removed")
         Log.d(TAG, "destroyed — all overlays removed")
     }
 
@@ -140,12 +141,14 @@ object DockManager {
             mainHandler.post {
                 if (destroyed) return@post
                 if (task != null) {
+                    flog("Launch", "task found for $targetPackage: taskId=${task.taskId} bounds=${task.bounds}")
                     startSession(task, targetPackage)
                 } else if (attempt < FIND_MAX_TRIES) {
                     mainHandler.postDelayed(
                         { attemptFind(targetPackage, attempt + 1) }, FIND_RETRY_MS
                     )
                 } else {
+                    flog("Launch", "NO freeform task found for $targetPackage after $FIND_MAX_TRIES tries")
                     Log.d(TAG, "no freeform task found for $targetPackage")
                 }
             }
@@ -166,6 +169,7 @@ object DockManager {
         val session = Session(task.taskId, targetPackage, label, icon)
         if (!task.bounds.isEmpty) session.originalBounds = Rect(task.bounds)
         sessions[task.taskId] = session
+        flog("Launch", "session STARTED task=${task.taskId} pkg=$targetPackage bounds=${task.bounds} label=$label")
         Log.d(TAG, "session started: task=${task.taskId} pkg=$targetPackage bounds=${task.bounds}")
 
         if (!session.originalBounds.isEmpty) showHeader(session)
@@ -224,7 +228,11 @@ object DockManager {
         val c = appContext ?: return
         val wm = windowManager ?: return
         if (session.header != null) return
-        if (!Settings.canDrawOverlays(c)) return
+        if (!Settings.canDrawOverlays(c)) {
+            flog("Header", "showHeader SKIPPED: overlay permission missing task=${session.taskId}")
+            Log.e(TAG, "showHeader SKIPPED: overlay permission missing task=${session.taskId}")
+            return
+        }
         if (session.originalBounds.isEmpty) return   // poll will retry once bounds are known
 
         val view = HeaderOverlayView(c).apply {
@@ -235,12 +243,14 @@ object DockManager {
         try {
             wm.addView(view, lp)
         } catch (e: Exception) {
+            flog("Header", "showHeader addView FAILED task=${session.taskId}: ${e.message}")
             Log.e(TAG, "addView header failed: ${e.message}")
             return
         }
         session.header = view
         session.headerParams = lp
         positionHeader(session, session.originalBounds)
+        flog("Header", "header SHOWN task=${session.taskId} listener wired")
         Log.d(TAG, "header shown for task=${session.taskId}")
     }
 
@@ -271,7 +281,11 @@ object DockManager {
         val wm = windowManager ?: return
         try {
             if (view.isAttachedToWindow) wm.removeViewImmediate(view) else wm.removeView(view)
-        } catch (e: Exception) {}
+            flog("Header", "header HIDDEN task=${session.taskId}")
+        } catch (e: Exception) {
+            flog("Header", "hideHeader FAILED task=${session.taskId}: ${e.message}")
+            Log.w(TAG, "hideHeader failed task=${session.taskId}: ${e.message}")
+        }
     }
 
     private fun headerListener(session: Session) = object : HeaderOverlayView.Listener {
@@ -309,6 +323,7 @@ object DockManager {
         }
 
         override fun onHeaderDragRelease() {
+            flog("Header", "onHeaderDragRelease task=${session.taskId} acc=(${session.dragAccX.toInt()},${session.dragAccY.toInt()})")
             session.dragging = false
             val base = session.dragBase ?: return
             session.dragBase = null
@@ -319,20 +334,31 @@ object DockManager {
             val ty = (base.top + session.dragAccY).toInt()
                 .coerceIn(0, (metrics.heightPixels - base.height()).coerceAtLeast(0))
             val target = Rect(tx, ty, tx + base.width(), ty + base.height())
+            flog("Header", "drag target=$target edge=${overlapsEdge(target)} → moveTask")
 
             executor.execute {
                 val log = StringBuilder()
                 val summary = DockTestHelper.moveTask(session.taskId, Rect(target), log)
                 dumpLog(log)
+                flog("Header", "moveTask returned: $summary")
                 mainHandler.post {
-                    if (destroyed || sessions[session.taskId] !== session) return@post
+                    if (destroyed || sessions[session.taskId] !== session) {
+                        flog("Header", "moveTask RESULT dropped (destroyed/session gone)")
+                        return@post
+                    }
                     if (isFailure(summary)) {
+                        flog("Header", "moveTask FAILED: $summary")
                         toast(summary)
                         return@post
                     }
                     session.originalBounds = Rect(target)
                     if (session.header != null) positionHeader(session, target)
-                    if (overlapsEdge(target)) dockSession(session)
+                    if (overlapsEdge(target)) {
+                        flog("Header", "edge overlap detected → auto dock")
+                        dockSession(session)
+                    } else {
+                        flog("Header", "moveTask OK task=${session.taskId} bounds=$target")
+                    }
                 }
             }
         }
@@ -341,10 +367,14 @@ object DockManager {
     // ── dock / restore / expand / close ───────────────────────────────────
 
     private fun dockSession(session: Session) {
-        if (session.docking || session.docked) return
+        if (session.docking || session.docked) {
+            flog("Dock", "dock SKIP: task=${session.taskId} docking=${session.docking} docked=${session.docked}")
+            return
+        }
         session.docking = true
-        val c = appContext ?: run { session.docking = false; return }
+        val c = appContext ?: run { session.docking = false; return }   // flog needs appContext too
 
+        flog("Dock", "dock START task=${session.taskId} pkg=${session.pkg} label=${session.label}")
         Log.d(TAG, "dock START: task=${session.taskId} pkg=${session.pkg} label=${session.label}")
         toast("Docking ${session.label}…")
 
@@ -352,20 +382,28 @@ object DockManager {
             // Exact proven Dock Test path: shrink() = find task by package /
             // highest taskId → cmd activity task resize → am task focus.
             val log = StringBuilder()
+            flog("Dock", "dock EXEC shrink() begin task=${session.taskId}")
             val summary = DockTestHelper.shrink(c, log, session.pkg)
             dumpLog(log)
+            flog("Dock", "dock EXEC shrink() returned: $summary")
             mainHandler.post {
                 session.docking = false
-                if (destroyed || sessions[session.taskId] !== session) return@post
+                if (destroyed || sessions[session.taskId] !== session) {
+                    flog("Dock", "dock RESULT dropped (destroyed/session gone) task=${session.taskId}")
+                    return@post
+                }
                 if (isFailure(summary)) {
+                    flog("Dock", "dock FAILED: $summary")
                     Log.e(TAG, "dock FAILED: task=${session.taskId} reason=$summary")
                     toast("Dock failed: $summary")
                 } else {
                     session.docked = true
                     val bubble = DockTestHelper.computeBubbleBounds(c)
+                    flog("Dock", "dock OK task=${session.taskId} bubble=$bubble — hiding header, showing bubble")
                     Log.d(TAG, "dock OK: task=${session.taskId} summary=$summary bubble=$bubble")
                     hideHeader(session)
                     if (showBubble(session, bubble)) {
+                        flog("Dock", "dock DONE: task=${session.taskId} bubble visible")
                         toast("Docked: ${session.label} → bubble")
                         haptic()
                     }
@@ -376,17 +414,24 @@ object DockManager {
 
     private fun onTapBubble(session: Session) {
         val c = appContext ?: return
+        flog("Restore", "restore START task=${session.taskId} bounds=${session.originalBounds} label=${session.label}")
         Log.d(TAG, "restore START: task=${session.taskId} bounds=${session.originalBounds}")
         toast("Restoring ${session.label}…")
         executor.execute {
             val log = StringBuilder()
+            flog("Restore", "restore EXEC restoreTo begin task=${session.taskId}")
             val summary = DockTestHelper.restoreTo(
                 c, session.taskId, Rect(session.originalBounds), log
             )
             dumpLog(log)
+            flog("Restore", "restore EXEC restoreTo returned: $summary")
             mainHandler.post {
-                if (destroyed || sessions[session.taskId] !== session) return@post
+                if (destroyed || sessions[session.taskId] !== session) {
+                    flog("Restore", "restore RESULT dropped (destroyed/session gone) task=${session.taskId}")
+                    return@post
+                }
                 if (isFailure(summary)) {
+                    flog("Restore", "restore FAILED: $summary")
                     Log.e(TAG, "restore FAILED: task=${session.taskId} reason=$summary")
                     toast("Restore failed: $summary")
                     return@post
@@ -394,6 +439,7 @@ object DockManager {
                 session.docked = false
                 hideBubble(session)
                 showHeader(session)
+                flog("Restore", "restore DONE task=${session.taskId} (bubble hidden, header shown)")
                 Log.d(TAG, "restore OK: task=${session.taskId} summary=$summary")
                 toast("Restored: ${session.label}")
             }
@@ -402,13 +448,16 @@ object DockManager {
 
     private fun expandSession(session: Session) {
         val c = appContext ?: return
+        flog("Expand", "expand START task=${session.taskId} label=${session.label}")
         executor.execute {
             val log = StringBuilder()
             val summary = DockTestHelper.expandTask(c, session.taskId, log)
             dumpLog(log)
+            flog("Expand", "expand EXEC returned: $summary")
             mainHandler.post {
                 if (destroyed || sessions[session.taskId] !== session) return@post
                 if (isFailure(summary)) {
+                    flog("Expand", "expand FAILED: $summary")
                     toast(summary)
                     return@post
                 }
@@ -420,24 +469,33 @@ object DockManager {
                 }
                 showHeader(session)
                 positionHeader(session, session.originalBounds)
+                flog("Expand", "expand DONE task=${session.taskId}")
                 Log.d(TAG, "expanded task=${session.taskId}")
             }
         }
     }
 
     private fun closeSession(session: Session) {
+        flog("Close", "close START task=${session.taskId} pkg=${session.pkg} label=${session.label}")
         Log.d(TAG, "close START: task=${session.taskId} pkg=${session.pkg}")
         toast("Closing ${session.label}…")
         executor.execute {
             val log = StringBuilder()
+            flog("Close", "close EXEC closeTask begin task=${session.taskId}")
             val summary = DockTestHelper.closeTask(session.taskId, log)
             dumpLog(log)
+            flog("Close", "close EXEC closeTask returned: $summary")
             mainHandler.post {
-                if (destroyed || sessions[session.taskId] !== session) return@post
+                if (destroyed || sessions[session.taskId] !== session) {
+                    flog("Close", "close RESULT dropped (destroyed/session gone) task=${session.taskId}")
+                    return@post
+                }
                 if (isFailure(summary)) {
+                    flog("Close", "close FAILED: $summary")
                     Log.e(TAG, "close FAILED: task=${session.taskId} reason=$summary")
                     toast("Close failed: $summary")
                 } else {
+                    flog("Close", "close OK task=${session.taskId} — removing session")
                     Log.d(TAG, "close OK: task=${session.taskId} summary=$summary")
                     toast("Closed: ${session.label}")
                     removeSession(session, "closed by user")
@@ -447,6 +505,7 @@ object DockManager {
     }
 
     private fun removeSession(session: Session, reason: String) {
+        flog("Session", "removeSession task=${session.taskId}: $reason")
         Log.d(TAG, "removeSession task=${session.taskId}: $reason")
         hideHeader(session)
         hideBubble(session)
@@ -462,6 +521,7 @@ object DockManager {
         val wm = windowManager ?: return false
         if (session.bubble != null) return true
         if (!Settings.canDrawOverlays(c)) {
+            flog("Bubble", "bubble show FAILED: overlay permission missing task=${session.taskId}")
             Log.e(TAG, "bubble NOT shown: overlay permission missing (task=${session.taskId})")
             toast("Bubble failed: overlay permission missing")
             return false
@@ -482,9 +542,11 @@ object DockManager {
             val maxY = (metrics.heightPixels - winH - inset).coerceAtLeast(inset)
             y = (((bubbleBounds.top + bubbleBounds.bottom) / 2) - winH / 2).coerceIn(inset, maxY)
         }
+        flog("Bubble", "bubble addView begin task=${session.taskId} x=${lp.x} y=${lp.y} ${winW}x$winH")
         try {
             wm.addView(view, lp)
         } catch (e: Exception) {
+            flog("Bubble", "bubble addView FAILED task=${session.taskId}: ${e.message}")
             Log.e(TAG, "bubble addView FAILED: task=${session.taskId} ${e.message}", e)
             toast("Bubble failed: ${e.message}")
             return false
@@ -492,6 +554,7 @@ object DockManager {
         session.bubble = view
         session.bubbleParams = lp
         session.bubbleSide = Gravity.RIGHT
+        flog("Bubble", "bubble SHOWN task=${session.taskId} listener wired")
         Log.d(TAG, "bubble shown for task=${session.taskId} x=${lp.x} y=${lp.y} ${winW}x$winH")
         return true
     }
@@ -506,7 +569,11 @@ object DockManager {
         val wm = windowManager ?: return
         try {
             if (view.isAttachedToWindow) wm.removeViewImmediate(view) else wm.removeView(view)
-        } catch (e: Exception) {}
+            flog("Bubble", "bubble HIDDEN task=${session.taskId}")
+        } catch (e: Exception) {
+            flog("Bubble", "hideBubble FAILED task=${session.taskId}: ${e.message}")
+            Log.w(TAG, "hideBubble failed task=${session.taskId}: ${e.message}")
+        }
     }
 
     private fun bubbleListener(session: Session) = object : BubbleOverlayView.Listener {
@@ -689,6 +756,12 @@ object DockManager {
     private fun dumpLog(log: StringBuilder) {
         val text = log.toString()
         if (text.isNotEmpty()) Log.d(TAG, text.take(3000))
+    }
+
+    /** Airtight step log: file + shared buffer + on-screen Dock Test log view. */
+    private fun flog(tag: String, message: String) {
+        val c = appContext ?: return
+        DockTestHelper.fileLog(c, tag, message)
     }
 
     private fun toast(message: String) {

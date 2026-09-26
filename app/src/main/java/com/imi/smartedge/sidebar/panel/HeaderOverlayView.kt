@@ -222,6 +222,8 @@ class HeaderOverlayView(context: Context) : View(context) {
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                DockTestHelper.fileLog(context, "HeaderTouch",
+                    "DOWN x=${event.x.toInt()} y=${event.y.toInt()} hit=${hitTest(event.x, event.y)} listener=${if (listener != null) "set" else "NULL"}")
                 downX = event.x
                 downY = event.y
                 lastX = event.x
@@ -251,11 +253,17 @@ class HeaderOverlayView(context: Context) : View(context) {
                 return true
             }
             MotionEvent.ACTION_UP -> {
+                DockTestHelper.fileLog(context, "HeaderTouch",
+                    "UP x=${event.x.toInt()} y=${event.y.toInt()} down=$downTarget dragging=$dragging listener=${if (listener != null) "set" else "NULL"}")
                 if (dragging) {
+                    DockTestHelper.fileLog(context, "HeaderBtn",
+                        "drag released → onHeaderDragRelease listener=${if (listener != null) "set" else "NULL — SWALLOWED"}")
                     listener?.onHeaderDragRelease()
                 } else {
                     val up = hitTest(event.x, event.y)
                     if (up != Target.NONE && up == downTarget) {
+                        DockTestHelper.fileLog(context, "HeaderBtn",
+                            "click target=$up → ${if (listener != null) "dispatching to listener" else "SWALLOWED (listener is NULL!)"}")
                         when (up) {
                             Target.EXPAND -> listener?.onExpand()
                             Target.DOCK -> listener?.onDock()
@@ -263,6 +271,9 @@ class HeaderOverlayView(context: Context) : View(context) {
                             else -> {}
                         }
                         if (up != Target.DRAG) performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                    } else {
+                        DockTestHelper.fileLog(context, "HeaderBtn",
+                            "UP ignored: hit=$up down=$downTarget (not a click)")
                     }
                 }
                 pressed = Target.NONE

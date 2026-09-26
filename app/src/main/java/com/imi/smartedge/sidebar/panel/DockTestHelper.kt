@@ -6,6 +6,7 @@ import android.graphics.Rect
 import android.util.Log
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuBinderWrapper
+import java.io.File
 
 /**
  * Shared dock-test logic used by both DockTestReceiver (notification buttons)
@@ -552,6 +553,76 @@ object DockTestHelper {
         log.appendLine(summary)
         Log.d(TAG, summary)
         return summary
+    }
+
+    // ── persistent file log (header / dock flows) ──────────────────────────
+
+    private const val LOG_FILE_NAME = "docklog.txt"
+    private const val LOG_FILE_MAX_BYTES = 500_000
+    private const val SHARED_LOG_MAX_CHARS = 100_000
+    private val fileLogLock = Any()
+    private val sharedLog = StringBuilder()
+
+    /** UI hook: MainActivity sets this so fileLog lines reach the Dock Test log view. */
+    @Volatile
+    var logListener: ((String) -> Unit)? = null
+
+    /** Snapshot of every fileLog line kept in memory this session (seeds the UI). */
+    fun sharedLogText(): String = synchronized(sharedLog) { sharedLog.toString() }
+
+    /**
+     * Airtight step logger: appends a timestamped line to
+     * `filesDir/docklog.txt` (created if missing; oldest lines dropped once
+     * the file passes ~500 KB), mirrors it into the shared in-memory buffer,
+     * and forwards it to [logListener] (marshalled to the main thread) so the
+     * Dock Test on-screen log + "Copy log" capture header-button activity.
+     * Thread-safe and never throws.
+     */
+    fun fileLog(context: Context, tag: String, message: String) {
+        try {
+            val time = java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+                .format(java.util.Date())
+            val line = "[$time][$tag] $message"
+
+            synchronized(fileLogLock) {
+                val file = File(context.filesDir, LOG_FILE_NAME)
+                if (file.exists() && file.length() > LOG_FILE_MAX_BYTES) {
+                    // Cap: keep only the newest lines (down to ~half the cap), rewrite.
+                    val kept = ArrayList<String>()
+                    var size = 0
+                    for (l in file.readLines().asReversed()) {
+                        val cost = l.length + 1
+                        if (size + cost > LOG_FILE_MAX_BYTES / 2) break
+                        kept.add(0, l)
+                        size += cost
+                    }
+                    file.writeText(if (kept.isEmpty()) "" else kept.joinToString("\n") + "\n")
+                    Log.d(TAG, "fileLog: trimmed $LOG_FILE_NAME to ${kept.size} newest lines")
+                }
+                file.appendText(line + "\n")
+            }
+
+            synchronized(sharedLog) {
+                sharedLog.append(line).append('\n')
+                if (sharedLog.length > SHARED_LOG_MAX_CHARS) {
+                    val half = SHARED_LOG_MAX_CHARS / 2
+                    val cut = sharedLog.indexOf("\n", sharedLog.length - half)
+                    sharedLog.delete(0, if (cut >= 0) cut + 1 else sharedLog.length - half)
+                }
+            }
+
+            val listener = logListener
+            if (listener != null) {
+                if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+                    listener(line)
+                } else {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post { listener(line) }
+                }
+            }
+            Log.d(TAG, "fileLog: $line")
+        } catch (e: Exception) {
+            Log.e(TAG, "fileLog FAILED (${e.javaClass.simpleName}): ${e.message}")
+        }
     }
 
     // ── internals ──────────────────────────────────────────────────────────

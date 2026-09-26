@@ -406,6 +406,13 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
     // ── Dock Test Card ─────────────────────────────────────────────────────
 
     private fun setupDockTest() {
+        // Stream header/dock flow lines (DockTestHelper.fileLog) into this
+        // view so "Copy log" captures header-button activity too, and seed
+        // anything logged before this activity opened.
+        DockTestHelper.logListener = { line -> appendDockLog(line) }
+        val seeded = DockTestHelper.sharedLogText()
+        if (seeded.isNotEmpty()) appendDockLog(seeded)
+
         binding.btnDockCheckShizuku.setOnClickListener {
             val log = StringBuilder()
             DockTestHelper.checkShizuku(log)
@@ -476,6 +483,51 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
         binding.btnDockClearLog.setOnClickListener {
             binding.tvDockTestLog.text = "Tap 'Check Shizuku' to start."
         }
+
+        binding.btnDockViewLogFile.setOnClickListener {
+            showDockLogFile()
+        }
+    }
+
+    /** Read docklog.txt (written by DockTestHelper.fileLog) and show/copy it. */
+    private fun showDockLogFile() {
+        val file = java.io.File(filesDir, "docklog.txt")
+        if (!file.exists() || file.length() == 0L) {
+            binding.root.showModernToast("docklog.txt is empty — tap a header button first")
+            return
+        }
+        val content = try {
+            file.readText()
+        } catch (e: Exception) {
+            "Failed to read docklog.txt: ${e.javaClass.simpleName}: ${e.message}"
+        }
+
+        val tv = TextView(this).apply {
+            setText(content)
+            setPadding(64, 32, 64, 32)
+            typeface = android.graphics.Typeface.MONOSPACE
+            textSize = 11f
+            setTextColor(Color.parseColor("#B3FFFFFF"))
+            layoutParams = android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val scroll = android.widget.ScrollView(this).apply { addView(tv) }
+
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle("docklog.txt")
+            .setView(scroll)
+            .setNeutralButton("Copy") { _, _ ->
+                val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                    as android.content.ClipboardManager
+                clipboard.setPrimaryClip(
+                    android.content.ClipData.newPlainText("docklog.txt", content)
+                )
+                binding.root.showModernToast("Dock log file copied")
+            }
+            .setPositiveButton("Close", null)
+            .show()
     }
 
     private fun appendDockLog(text: String) {
@@ -490,6 +542,7 @@ class MainActivity : AppCompatActivity(), android.content.SharedPreferences.OnSh
 
     override fun onDestroy() {
         super.onDestroy()
+        DockTestHelper.logListener = null
         dockTestCountdown?.let { dockTestHandler.removeCallbacks(it) }
     }
 }
