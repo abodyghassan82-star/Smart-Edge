@@ -401,16 +401,26 @@ object DockTestHelper {
         val quiet = StringBuilder()
         val output = runShizukuCommand("dumpsys activity activities", quiet) ?: return null
         val dm = context.resources.displayMetrics
-        val match = parseTaskBlocks(output.lines())
+        val candidates = parseTaskBlocks(output.lines())
             .filter { it.isFreeform && it.taskId != null && matchesPackage(it, targetPackage) }
             .filter { b ->
                 val bounds = b.bounds
                 bounds == null || !isMostlyOffScreen(bounds, dm.widthPixels, dm.heightPixels)
             }
-            .maxByOrNull { it.taskId ?: -1 } ?: return null
+        if (candidates.isEmpty()) return null
+        val maxId = candidates.maxOf { it.taskId ?: -1 }
+        // The dump lists each task in several sections; summary lines
+        // ("(freeform) Task{...}") carry no bounds — prefer the block
+        // that actually has a usable window rectangle.
+        val match = candidates.firstOrNull { it.taskId == maxId && hasUsableBounds(it.bounds) }
+            ?: candidates.first { it.taskId == maxId }
         val id = match.taskId ?: return null
         return DockTask(id, match.bounds ?: Rect(), match.pkg)
     }
+
+    /** Non-null, non-empty window rectangle. */
+    private fun hasUsableBounds(bounds: Rect?): Boolean =
+        bounds != null && !bounds.isEmpty
 
     /**
      * Shrink a KNOWN task ([taskId]) to the bubble target and save
@@ -514,8 +524,12 @@ object DockTestHelper {
     fun queryTaskBounds(taskId: Int): Rect? {
         val quiet = StringBuilder()
         val output = runShizukuCommand("dumpsys activity activities", quiet) ?: return null
-        val block = parseTaskBlocks(output.lines()).firstOrNull { it.taskId == taskId } ?: return null
-        return block.bounds ?: Rect()
+        val blocks = parseTaskBlocks(output.lines()).filter { it.taskId == taskId }
+        if (blocks.isEmpty()) return null
+        // Same task id appears in multiple dump sections; summary blocks have
+        // no bounds line — only a block with a real rectangle is trustworthy.
+        val usable = blocks.firstOrNull { hasUsableBounds(it.bounds) }
+        return usable?.bounds ?: Rect()
     }
 
     /** The bubble shrink target: 160×160 dp near the right edge (matches shrink()). */
@@ -630,7 +644,8 @@ object DockTestHelper {
     // Case-insensitive patterns for freeform detection
     private val FREEFORM_MODE_PATTERNS = listOf(
         Regex("(?i)(?:windowingMode|mWindowingMode|winMode|mode)=freeform"),
-        Regex("(?i)(?:windowingMode|mWindowingMode|winMode|mode)=5\\b")
+        Regex("(?i)(?:windowingMode|mWindowingMode|winMode|mode)=5\\b"),
+        Regex("(?i)\\(freeform\\)")   // summary lines: "(freeform) Task{... #1001 ...}"
     )
 
     // Task ID patterns: "taskId=123" or "#123" inside a Task{ line
