@@ -11,6 +11,7 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import kotlin.math.roundToInt
 
 /**
  * Docked edge bubble (Phase B of the dock-to-bubble spec).
@@ -176,7 +177,9 @@ class BubbleOverlayView(context: Context) : View(context) {
         if (icon != null) {
             val cx = bubble.centerX()
             val cy = bubble.centerY()
-            icon.setBounds(cx - iconSize / 2, cy - iconSize / 2, cx + iconSize / 2, cy + iconSize / 2)
+            val left = (cx - iconSize / 2f).roundToInt()
+            val top = (cy - iconSize / 2f).roundToInt()
+            icon.setBounds(left, top, left + iconSize, top + iconSize)
             icon.draw(canvas)
         }
     }
